@@ -1,0 +1,4 @@
+.env
+asmr.db
+__pycache__/
+*.pyc

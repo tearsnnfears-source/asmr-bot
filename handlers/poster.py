@@ -392,7 +392,7 @@ async def got_channel(message: Message, state: FSMContext):
 async def got_text(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         return
-    await state.update_data(text=message.html_text or message.text)
+    await state.update_data(text=message.text or "")
     await state.set_state(PostForm.photo)
     await message.answer(
         "🖼 <b>Шаг 3/5 — Фото</b>\n\nОтправь фото или нажми «Пропустить».",

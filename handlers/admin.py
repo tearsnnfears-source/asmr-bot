@@ -182,16 +182,17 @@ async def cmd_admin_help(message: Message):
         "/del_video [id] — удалить видео по ID\n"
         "/allvideos — показать все видео\n\n"
         "🎨 <b>Профиль артиста (контент в миниапп):</b>\n"
-        "/set_cont — добавить видео/фото артисту (интерактивно)\n"
+        "/add_cont [имя] — добавить видео/фото артисту\n"
+        "   Пример: /add_cont Moona ASMR\n"
         "/list_cont [имя] — просмотреть контент артиста\n"
         "/clear_cont [имя] videos|photos|all — очистить контент\n\n"
         "📣 <b>Постинг в каналы:</b>\n"
         "/new_post — создать пост (текст, фото, кнопки, отсрочка)\n"
         "/scheduled_posts — список запланированных постов\n"
         "/cancel_post [id] — отменить запланированный пост\n\n"
-        "📝 <b>Пример /set_cont:</b>\n"
-        "Запусти команду — бот спросит имя артиста, тип (videos/photos),\n"
-        "затем принимает все данные одним сообщением."
+        "📝 <b>Пример /add_cont:</b>\n"
+        "/add_cont Moona ASMR — бот сразу спросит тип контента\n"
+        "Затем принимает все данные одним сообщением."
     )
 
 
@@ -321,6 +322,10 @@ async def cmd_set_cont(message: Message):
         "/set_artist_profile_photo [имя] [url] — установить фото профиля\n"
         "/set_artist_link [имя] [url] — ссылка на топик в группе\n"
         "/allartists — показать всех артистов\n\n"
+        "Контент профиля:\n"
+        "/add_cont [имя] — загрузить видео/фото артисту\n"
+        "/list_cont [имя] — показать контент артиста\n"
+        "/clear_cont [имя] videos|photos|all — очистить контент\n\n"
         "Теги:\n"
         "/artist_hot_on [имя] — добавить тег HOT\n"
         "/artist_hot_off [имя] — убрать тег HOT\n"
@@ -848,18 +853,47 @@ def _cancel_kb_c():
     ]])
 
 
-@router.message(Command("set_cont"))
-async def cmd_set_cont(message: Message, state: FSMContext):
+@router.message(Command("add_cont"))
+async def cmd_add_cont(message: Message, state: FSMContext, session: AsyncSession):
     if not is_admin(message.from_user.id):
         return
     await state.clear()
-    await state.set_state(SetContForm.artist)
-    await message.answer(
-        "🎨 <b>Загрузка контента для профиля артиста</b>\n\n"
-        "Шаг 1/4 — Введи имя артиста (точно как в базе):",
-        parse_mode="HTML",
-        reply_markup=_cancel_kb_c()
-    )
+
+    # Поддержка передачи имени артиста сразу: /add_cont Moona ASMR
+    args = message.text.split(maxsplit=1)
+    artist_name = args[1].strip() if len(args) > 1 else None
+
+    if artist_name:
+        artist = await get_artist(session, artist_name)
+        if not artist:
+            await message.answer(
+                f"❌ Артист <b>{artist_name}</b> не найден. Проверь имя командой /allartists",
+                parse_mode="HTML"
+            )
+            return
+        counts = await get_artist_content_counts(session, artist_name)
+        await state.update_data(artist=artist_name)
+        await state.set_state(SetContForm.ctype)
+        await message.answer(
+            f"✅ Артист: <b>{artist_name}</b>\n"
+            f"📹 Видео в профиле: {counts['video']} · 🖼 Фото: {counts['photo']}\n\n"
+            "Шаг 2/4 — Что загружаем?",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📹 Видео", callback_data="setcont_videos"),
+                 InlineKeyboardButton(text="🖼 Фото", callback_data="setcont_photos")],
+                [InlineKeyboardButton(text="❌ Отмена", callback_data="setcont_cancel")],
+            ])
+        )
+    else:
+        await state.set_state(SetContForm.artist)
+        await message.answer(
+            "🎨 <b>Загрузка контента для профиля артиста</b>\n\n"
+            "Шаг 1/4 — Введи имя артиста (точно как в базе)\n"
+            "или используй: <code>/add_cont Имя Артиста</code>",
+            parse_mode="HTML",
+            reply_markup=_cancel_kb_c()
+        )
 
 
 @router.message(SetContForm.artist)

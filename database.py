@@ -59,6 +59,19 @@ class Favorite(Base):
     created_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class ArtistContent(Base):
+    __tablename__ = "artist_content"
+
+    id:           Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    artist_name:  Mapped[str]      = mapped_column(String(128), index=True)
+    content_type: Mapped[str]      = mapped_column(String(8))   # "video" | "photo"
+    title:        Mapped[str|None] = mapped_column(String(256), nullable=True)
+    url:          Mapped[str]      = mapped_column(Text)
+    tags:         Mapped[str|None] = mapped_column(String(256), nullable=True)  # "HOT,NEW,EXCLUSIVE"
+    sort_order:   Mapped[int]      = mapped_column(Integer, default=0)
+    created_at:   Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Artist(Base):
     __tablename__ = "artists"
 
@@ -112,6 +125,8 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_expiry BOOLEAN DEFAULT TRUE",
             "ALTER TABLE videos ADD COLUMN IF NOT EXISTS thumbnail_url VARCHAR(512)",
             "ALTER TABLE artists ADD COLUMN IF NOT EXISTS topic_url VARCHAR(512)",
+            "CREATE TABLE IF NOT EXISTS artist_content (id SERIAL PRIMARY KEY, artist_name VARCHAR(128), content_type VARCHAR(8), title VARCHAR(256), url TEXT, tags VARCHAR(256), sort_order INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW())",
+            "CREATE INDEX IF NOT EXISTS idx_artist_content_name ON artist_content (artist_name)",
         ]
         try:
             async with engine.begin() as conn:
@@ -285,3 +300,53 @@ async def delete_video(session: AsyncSession, video_id: int) -> bool:
         await session.commit()
         return True
     return False
+
+
+# ─── ArtistContent CRUD ───────────────────────────────────────────────────────
+
+async def get_artist_content(session: AsyncSession, artist_name: str,
+                              content_type: str | None = None) -> list[ArtistContent]:
+    from sqlalchemy import select
+    q = select(ArtistContent).where(ArtistContent.artist_name == artist_name)
+    if content_type:
+        q = q.where(ArtistContent.content_type == content_type)
+    q = q.order_by(ArtistContent.sort_order, ArtistContent.created_at)
+    result = await session.execute(q)
+    return list(result.scalars().all())
+
+
+async def add_artist_content(session: AsyncSession, artist_name: str, content_type: str,
+                              url: str, title: str | None = None, tags: str | None = None,
+                              sort_order: int = 0) -> ArtistContent:
+    item = ArtistContent(
+        artist_name=artist_name, content_type=content_type,
+        url=url, title=title, tags=tags, sort_order=sort_order,
+    )
+    session.add(item)
+    await session.commit()
+    await session.refresh(item)
+    return item
+
+
+async def clear_artist_content(session: AsyncSession, artist_name: str,
+                                content_type: str | None = None) -> int:
+    from sqlalchemy import delete
+    q = delete(ArtistContent).where(ArtistContent.artist_name == artist_name)
+    if content_type:
+        q = q.where(ArtistContent.content_type == content_type)
+    result = await session.execute(q)
+    await session.commit()
+    return result.rowcount
+
+
+async def get_artist_content_counts(session: AsyncSession, artist_name: str) -> dict:
+    from sqlalchemy import select, func
+    result = await session.execute(
+        select(ArtistContent.content_type, func.count(ArtistContent.id))
+        .where(ArtistContent.artist_name == artist_name)
+        .group_by(ArtistContent.content_type)
+    )
+    counts = {"video": 0, "photo": 0}
+    for ct, cnt in result.all():
+        counts[ct] = cnt
+    return counts

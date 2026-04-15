@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, Video, create_video, get_all_videos, delete_video
+from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, Video, create_video, get_all_videos, delete_video, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts
 from handlers.group import enable_night_mode, disable_night_mode
 from config import ADMIN_IDS, GROUP_ID, INVITE_LINK
 
@@ -181,12 +181,17 @@ async def cmd_admin_help(message: Message):
         "/add_video [название] [артист] [embed_url] [duration] — добавить видео\n"
         "/del_video [id] — удалить видео по ID\n"
         "/allvideos — показать все видео\n\n"
+        "🎨 <b>Профиль артиста (контент в миниапп):</b>\n"
+        "/set_cont — добавить видео/фото артисту (интерактивно)\n"
+        "/list_cont [имя] — просмотреть контент артиста\n"
+        "/clear_cont [имя] videos|photos|all — очистить контент\n\n"
         "📣 <b>Постинг в каналы:</b>\n"
         "/new_post — создать пост (текст, фото, кнопки, отсрочка)\n"
         "/scheduled_posts — список запланированных постов\n"
         "/cancel_post [id] — отменить запланированный пост\n\n"
-        "📝 <b>Пример добавления видео:</b>\n"
-        "<code>/add_video \"Название\" \"Артист\" \"https://player.mediadelivery.net/embed/...\" \"12:34\"</code>"
+        "📝 <b>Пример /set_cont:</b>\n"
+        "Запусти команду — бот спросит имя артиста, тип (videos/photos),\n"
+        "затем принимает все данные одним сообщением."
     )
 
 
@@ -803,3 +808,267 @@ async def cmd_all_videos(message: Message, session: AsyncSession):
         chunk = lines[i:i + chunk_size]
         text = header + "\n".join(chunk) if i == 0 else "\n".join(chunk)
         await message.answer(text, parse_mode="HTML")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ARTIST PROFILE CONTENT — /set_cont, /list_cont, /clear_cont
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# /set_cont
+#   Бот спрашивает: имя артиста → тип (videos/photos) → режим (replace/add)
+#   Затем одним сообщением принимаешь массив:
+#
+#   VIDEOS (одна строка = одно видео):
+#     Название видео | https://url | HOT,NEW
+#     Другое видео   | https://url2 | EXCLUSIVE
+#     Третье видео   | https://url3
+#
+#   PHOTOS (одна строка = один URL):
+#     https://photo1.jpg
+#     https://photo2.jpg
+#
+# /list_cont Имя Артиста
+# /clear_cont Имя Артиста videos|photos|all
+# ─────────────────────────────────────────────────────────────────────────────
+
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+
+class SetContForm(StatesGroup):
+    artist  = State()
+    ctype   = State()
+    mode    = State()
+    content = State()
+
+
+def _cancel_kb_c():
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="❌ Отмена", callback_data="setcont_cancel")
+    ]])
+
+
+@router.message(Command("set_cont"))
+async def cmd_set_cont(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    await state.set_state(SetContForm.artist)
+    await message.answer(
+        "🎨 <b>Загрузка контента для профиля артиста</b>\n\n"
+        "Шаг 1/4 — Введи имя артиста (точно как в базе):",
+        parse_mode="HTML",
+        reply_markup=_cancel_kb_c()
+    )
+
+
+@router.message(SetContForm.artist)
+async def setcont_got_artist(message: Message, state: FSMContext, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+    name = message.text.strip()
+    artist = await get_artist(session, name)
+    if not artist:
+        await message.answer(
+            f"❌ Артист <b>{name}</b> не найден. Проверь имя и попробуй снова.",
+            parse_mode="HTML"
+        )
+        return
+    counts = await get_artist_content_counts(session, name)
+    await state.update_data(artist=name)
+    await state.set_state(SetContForm.ctype)
+    await message.answer(
+        f"✅ Артист: <b>{name}</b>\n"
+        f"📹 Видео в профиле: {counts['video']} · 🖼 Фото: {counts['photo']}\n\n"
+        "Шаг 2/4 — Что загружаем?",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📹 Видео", callback_data="setcont_videos"),
+             InlineKeyboardButton(text="🖼 Фото", callback_data="setcont_photos")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="setcont_cancel")],
+        ])
+    )
+
+
+@router.callback_query(F.data.in_({"setcont_videos", "setcont_photos"}), SetContForm.ctype)
+async def setcont_got_type(call, state: FSMContext, session: AsyncSession):
+    ctype = "video" if call.data == "setcont_videos" else "photo"
+    data = await state.get_data()
+    counts = await get_artist_content_counts(session, data["artist"])
+    existing = counts[ctype]
+    await state.update_data(ctype=ctype)
+    await state.set_state(SetContForm.mode)
+    await call.message.edit_text(
+        f"Шаг 3/4 — В базе уже <b>{existing}</b> {'видео' if ctype == 'video' else 'фото'} для <b>{data['artist']}</b>.\n\n"
+        "Что делаем?",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="♻️ Заменить всё", callback_data="setcont_replace"),
+             InlineKeyboardButton(text="➕ Добавить к существующим", callback_data="setcont_add")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="setcont_cancel")],
+        ])
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.in_({"setcont_replace", "setcont_add"}), SetContForm.mode)
+async def setcont_got_mode(call, state: FSMContext):
+    mode = "replace" if call.data == "setcont_replace" else "add"
+    data = await state.get_data()
+    await state.update_data(mode=mode)
+    await state.set_state(SetContForm.content)
+
+    if data["ctype"] == "video":
+        hint = (
+            "Шаг 4/4 — Отправь список видео, <b>одно на строку</b>:\n\n"
+            "<code>Название | URL | ТЕГИ</code>\n\n"
+            "Теги (необязательно) через запятую:\n"
+            "<code>HOT</code> · <code>NEW</code> · <code>EXCLUSIVE</code> · <code>FREE</code>\n\n"
+            "Пример:\n"
+            "<code>Night ASMR Rain | https://example.com/v1 | HOT,NEW\n"
+            "Whisper Triggers | https://example.com/v2 | EXCLUSIVE\n"
+            "Soft Tapping | https://example.com/v3</code>"
+        )
+    else:
+        hint = (
+            "Шаг 4/4 — Отправь URLs фотографий, <b>одна на строку</b>:\n\n"
+            "<code>https://cdn.example.com/photo1.jpg\n"
+            "https://cdn.example.com/photo2.jpg\n"
+            "https://cdn.example.com/photo3.jpg</code>"
+        )
+
+    await call.message.edit_text(hint, parse_mode="HTML", reply_markup=_cancel_kb_c())
+    await call.answer()
+
+
+@router.message(SetContForm.content)
+async def setcont_got_content(message: Message, state: FSMContext, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    artist_name = data["artist"]
+    ctype = data["ctype"]
+    mode = data["mode"]
+
+    lines = [l.strip() for l in message.text.strip().splitlines() if l.strip()]
+    if not lines:
+        await message.answer("⚠️ Пустой список. Попробуй ещё раз.")
+        return
+
+    # Replace mode — clear first
+    if mode == "replace":
+        deleted = await clear_artist_content(session, artist_name, ctype)
+    else:
+        deleted = 0
+
+    added = 0
+    errors = []
+
+    for i, line in enumerate(lines):
+        try:
+            if ctype == "video":
+                parts = [p.strip() for p in line.split("|")]
+                if len(parts) < 2:
+                    errors.append(f"Строка {i+1}: нет разделителя |")
+                    continue
+                title = parts[0]
+                url = parts[1]
+                tags = parts[2].upper() if len(parts) >= 3 else None
+                if not url.startswith("http"):
+                    errors.append(f"Строка {i+1}: невалидный URL")
+                    continue
+                await add_artist_content(session, artist_name, "video",
+                                          url=url, title=title, tags=tags, sort_order=i)
+            else:
+                url = line
+                if not url.startswith("http"):
+                    errors.append(f"Строка {i+1}: невалидный URL")
+                    continue
+                await add_artist_content(session, artist_name, "photo",
+                                          url=url, sort_order=i)
+            added += 1
+        except Exception as e:
+            errors.append(f"Строка {i+1}: {e}")
+
+    await state.clear()
+
+    summary = (
+        f"✅ <b>Готово!</b> Артист: <b>{artist_name}</b>\n"
+        f"{'♻️ Удалено: ' + str(deleted) + ' | ' if deleted else ''}"
+        f"➕ Добавлено: <b>{added}</b> {'видео' if ctype == 'video' else 'фото'}\n"
+    )
+    if errors:
+        summary += f"\n⚠️ Ошибок: {len(errors)}\n" + "\n".join(errors[:5])
+
+    await message.answer(summary, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "setcont_cancel")
+async def setcont_cancel(call, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("❌ Отменено.")
+    await call.answer()
+
+
+# ─── /list_cont ───────────────────────────────────────────────────────────────
+
+@router.message(Command("list_cont"))
+async def cmd_list_cont(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Использование: /list_cont [имя артиста]")
+        return
+    name = args[1].strip()
+    videos = await get_artist_content(session, name, "video")
+    photos = await get_artist_content(session, name, "photo")
+
+    if not videos and not photos:
+        await message.answer(f"📭 Контент для <b>{name}</b> не найден.", parse_mode="HTML")
+        return
+
+    lines = [f"📋 <b>Контент: {name}</b>\n"]
+    if videos:
+        lines.append(f"📹 <b>Видео ({len(videos)}):</b>")
+        for v in videos[:15]:
+            tags_str = f" [{v.tags}]" if v.tags else ""
+            lines.append(f"  {v.sort_order+1}. {v.title or '—'}{tags_str}\n     <code>{v.url[:60]}...</code>" if len(v.url) > 60 else f"  {v.sort_order+1}. {v.title or '—'}{tags_str}\n     <code>{v.url}</code>")
+        if len(videos) > 15:
+            lines.append(f"  ... и ещё {len(videos)-15}")
+
+    if photos:
+        lines.append(f"\n🖼 <b>Фото ({len(photos)}):</b>")
+        for p in photos[:10]:
+            lines.append(f"  {p.sort_order+1}. <code>{p.url[:60]}{'...' if len(p.url)>60 else ''}</code>")
+        if len(photos) > 10:
+            lines.append(f"  ... и ещё {len(photos)-10}")
+
+    await message.answer("\n".join(lines), parse_mode="HTML")
+
+
+# ─── /clear_cont ─────────────────────────────────────────────────────────────
+
+@router.message(Command("clear_cont"))
+async def cmd_clear_cont(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 3:
+        await message.answer(
+            "Использование: /clear_cont [имя] videos|photos|all\n"
+            "Пример: /clear_cont Moona ASMR videos"
+        )
+        return
+    mode = parts[-1].lower()
+    name = " ".join(parts[1:-1])
+    if mode not in ("videos", "photos", "all"):
+        await message.answer("⚠️ Тип должен быть: videos, photos или all")
+        return
+    ctype = None if mode == "all" else mode.rstrip("s")  # "videos"→"video", "photos"→"photo"
+    deleted = await clear_artist_content(session, name, ctype)
+    label = {"videos": "видео", "photos": "фото", "all": "всего контента"}.get(mode, mode)
+    await message.answer(
+        f"🗑 Удалено <b>{deleted}</b> записей {label} для <b>{name}</b>.",
+        parse_mode="HTML"
+    )

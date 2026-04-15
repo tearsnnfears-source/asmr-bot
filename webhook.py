@@ -8,7 +8,7 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select
 
-from database import async_session, User, PendingPayment, Artist, get_all_artists, Video, get_all_videos
+from database import async_session, User, PendingPayment, Artist, get_all_artists, Video, get_all_videos, ArtistContent, get_artist_content
 from config import TRIBUTE_API_KEY, BOT_TOKEN, INVITE_LINK, STARS_PRICES, RUB_PRICES
 from utils.yoomoney import make_payment_url, generate_label
 
@@ -199,9 +199,17 @@ async def api_get_artists(request: web.Request) -> web.Response:
     async with async_session() as session:
         result = await session.execute(select(Artist).order_by(Artist.name))
         artists = result.scalars().all()
+        # Check which artists have profile content
+        from sqlalchemy import func
+        content_result = await session.execute(
+            select(ArtistContent.artist_name, func.count(ArtistContent.id))
+            .group_by(ArtistContent.artist_name)
+        )
+        artists_with_content = {row[0] for row in content_result.all() if row[1] > 0}
         artists_data = [{
             "name": a.name, "photo_url": a.photo_url, "profile_photo_url": a.profile_photo_url,
             "topic_url": getattr(a, 'topic_url', None),
+            "has_profile": a.name in artists_with_content,
             "photos": a.photos, "videos": a.videos, "tag_hot": getattr(a, 'tag_hot', False),
             "tag_new": getattr(a, 'tag_new', False), "tag_prom": getattr(a, 'tag_prom', False)
         } for a in artists]
@@ -410,6 +418,28 @@ async def api_get_videos(request: web.Request) -> web.Response:
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
+async def api_get_artist_content(request: web.Request) -> web.Response:
+    """GET /miniapp/artist_content?name=ArtistName"""
+    artist_name = request.rel_url.query.get("name", "").strip()
+    if not artist_name:
+        return web.json_response({"error": "name required"}, status=400)
+    async with async_session() as session:
+        videos = await get_artist_content(session, artist_name, "video")
+        photos = await get_artist_content(session, artist_name, "photo")
+    return web.json_response({
+        "artist": artist_name,
+        "videos": [
+            {"id": v.id, "title": v.title or "", "url": v.url,
+             "tags": v.tags or "", "sort_order": v.sort_order}
+            for v in videos
+        ],
+        "photos": [
+            {"id": p.id, "url": p.url, "sort_order": p.sort_order}
+            for p in photos
+        ],
+    })
+
+
 def create_app() -> web.Application:
     app = web.Application()
     app.middlewares.append(cors_middleware)
@@ -425,4 +455,5 @@ def create_app() -> web.Application:
     app.router.add_post("/miniapp/favorites/add", api_add_favorite)
     app.router.add_post("/miniapp/favorites/delete", api_delete_favorite)
     app.router.add_post("/miniapp/free_trial", api_free_trial)
+    app.router.add_get("/miniapp/artist_content", api_get_artist_content)
     return app

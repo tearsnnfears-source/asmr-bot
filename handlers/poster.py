@@ -26,6 +26,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -91,6 +92,10 @@ class PostForm(StatesGroup):
 # ── Парсинг кнопок ────────────────────────────────────────────────────────────
 
 BUTTON_STYLES = {"danger", "success", "primary"}
+CUSTOM_EMOJI_TAG_RE = re.compile(
+    r"<tg-emoji\b[^>]*emoji-id=['\"]\d+['\"][^>]*>.*?</tg-emoji>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
 
 def _parse_buttons(raw: str) -> list[list[dict]] | None:
@@ -134,6 +139,34 @@ def _build_keyboard(button_rows: list[list[dict]] | None) -> InlineKeyboardMarku
             kb_row.append(InlineKeyboardButton(**kwargs))
         kb_rows.append(kb_row)
     return InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+
+def _contains_custom_emoji_markup(text: str) -> bool:
+    return bool(text and CUSTOM_EMOJI_TAG_RE.search(text))
+
+
+async def _send_custom_emoji_channel_notice(message: Message, bot: Bot, channel: str, text: str):
+    if not _contains_custom_emoji_markup(text):
+        return
+
+    try:
+        chat = await bot.get_chat(channel)
+    except Exception as e:
+        logger.warning(f"Cannot inspect chat {channel!r} for custom emoji support: {e}")
+        return
+
+    if getattr(chat, "type", None) != "channel":
+        return
+
+    await message.answer(
+        "⚠️ <b>Premium emoji и канал</b>\n\n"
+        "По Telegram Bot API 9.4+ custom emoji для ботов с Telegram Premium у владельца "
+        "работают только в <b>private/group/supergroup</b>.\n"
+        "Для <b>channel</b>-постов боту нужен дополнительный collectible username, "
+        "назначенный через Fragment.\n\n"
+        "Иначе Telegram публикует обычный fallback emoji вместо <code>&lt;tg-emoji&gt;</code>.",
+        parse_mode="HTML",
+    )
 
 
 def _parse_schedule(raw: str) -> datetime | None:
@@ -246,7 +279,7 @@ async def cmd_del_preset(message: Message):
 # ── /new_post [preset] ────────────────────────────────────────────────────────
 
 @router.message(Command("new_post"))
-async def cmd_new_post(message: Message, state: FSMContext):
+async def cmd_new_post(message: Message, state: FSMContext, bot: Bot):
     if not is_admin(message.from_user.id):
         return
 
@@ -259,7 +292,7 @@ async def cmd_new_post(message: Message, state: FSMContext):
             await state.clear()
             await state.update_data(**preset)
             await state.set_state(PostForm.confirm)
-            await _show_preset_preview(message, preset, preset_name)
+            await _show_preset_preview(message, preset, preset_name, bot)
             return
         else:
             await message.answer(f"⚠️ Пресет «{preset_name}» не найден. Начинаем с нуля.\n")
@@ -283,7 +316,7 @@ async def cmd_new_post(message: Message, state: FSMContext):
     )
 
 
-async def _show_preset_preview(message: Message, preset: dict, preset_name: str):
+async def _show_preset_preview(message: Message, preset: dict, preset_name: str, bot: Bot):
     channel = preset.get("channel", "—")
     text = preset.get("text", "")
     photo = preset.get("photo")
@@ -295,6 +328,8 @@ async def _show_preset_preview(message: Message, preset: dict, preset_name: str)
         f"📢 Канал: <code>{channel}</code>\n"
         f"{'─' * 28}\n\n"
     )
+
+    await _send_custom_emoji_channel_notice(message, bot, channel, text)
 
     try:
         if photo:
@@ -510,6 +545,8 @@ async def _process_schedule(message: Message, state: FSMContext, raw: str, bot: 
         f"📢 <code>{channel}</code> · 🕐 <b>{time_str}</b>\n"
         f"{'─' * 28}\n\n"
     )
+
+    await _send_custom_emoji_channel_notice(message, bot, channel, text)
 
     try:
         if photo:

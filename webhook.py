@@ -8,7 +8,7 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select
 
-from database import async_session, User, PendingPayment, Artist, get_all_artists, Video, get_all_videos, ArtistContent, get_artist_content
+from database import async_session, User, PendingPayment, Artist, get_all_artists, Video, get_all_videos, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS
 from config import TRIBUTE_API_KEY, BOT_TOKEN, INVITE_LINK, STARS_PRICES, RUB_PRICES
 from utils.yoomoney import make_payment_url, generate_label
 
@@ -440,6 +440,120 @@ async def api_get_artist_content(request: web.Request) -> web.Response:
     })
 
 
+async def api_get_tags(request: web.Request) -> web.Response:
+    """GET /miniapp/tags — все теги с цветами"""
+    async with async_session() as session:
+        tags = await get_all_tags(session)
+        return web.json_response({
+            "tags": [{"name": t.name, "color": t.color} for t in tags]
+        })
+
+
+def _parse_user_id(init_data: str) -> int | None:
+    params = dict(urllib.parse.parse_qsl(init_data))
+    try:
+        return json.loads(params['user']).get('id') if 'user' in params else None
+    except Exception:
+        return None
+
+
+async def api_get_video_reactions(request: web.Request) -> web.Response:
+    """GET /miniapp/video/{id}/reactions?initData=..."""
+    content_id = int(request.match_info.get("id", 0))
+    init_data = request.rel_url.query.get("initData", "")
+    user_id = _parse_user_id(init_data) if init_data else None
+
+    async with async_session() as session:
+        counts = await get_reactions(session, content_id)
+        user_reaction = None
+        if user_id:
+            user_reaction = await get_user_reaction(session, content_id, user_id)
+        return web.json_response({
+            "content_id": content_id,
+            "counts": counts,
+            "user_reaction": user_reaction,
+            "allowed": ALLOWED_REACTIONS,
+        })
+
+
+async def api_post_reaction(request: web.Request) -> web.Response:
+    """POST /miniapp/video/{id}/react  body: {initData, emoji}"""
+    content_id = int(request.match_info.get("id", 0))
+    try:
+        data = await request.json()
+        init_data = data.get("initData", "")
+        emoji = data.get("emoji", "")
+        user_id = _parse_user_id(init_data)
+        if not user_id:
+            return web.json_response({"error": "Cannot parse user"}, status=403)
+        if emoji not in ALLOWED_REACTIONS:
+            return web.json_response({"error": "Invalid emoji"}, status=400)
+
+        async with async_session() as session:
+            # verify subscription
+            from sqlalchemy import select as sa_select
+            result = await session.execute(sa_select(User).where(User.telegram_id == user_id))
+            user = result.scalar_one_or_none()
+            if not user or user.units <= 0:
+                return web.json_response({"error": "No subscription"}, status=403)
+            counts = await set_reaction(session, content_id, user_id, emoji)
+            user_reaction = await get_user_reaction(session, content_id, user_id)
+            return web.json_response({"counts": counts, "user_reaction": user_reaction})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def api_get_comments(request: web.Request) -> web.Response:
+    """GET /miniapp/video/{id}/comments"""
+    content_id = int(request.match_info.get("id", 0))
+    async with async_session() as session:
+        comments = await get_comments(session, content_id)
+        return web.json_response({
+            "comments": [
+                {
+                    "id": c.id,
+                    "username": c.username or "Anonymous",
+                    "text": c.text,
+                    "created_at": c.created_at.strftime("%d.%m %H:%M"),
+                }
+                for c in reversed(comments)  # oldest first
+            ]
+        })
+
+
+async def api_post_comment(request: web.Request) -> web.Response:
+    """POST /miniapp/video/{id}/comment  body: {initData, text}"""
+    content_id = int(request.match_info.get("id", 0))
+    try:
+        data = await request.json()
+        init_data = data.get("initData", "")
+        text = data.get("text", "").strip()
+        user_id = _parse_user_id(init_data)
+        if not user_id:
+            return web.json_response({"error": "Cannot parse user"}, status=403)
+        if not text:
+            return web.json_response({"error": "Empty comment"}, status=400)
+
+        async with async_session() as session:
+            from sqlalchemy import select as sa_select
+            result = await session.execute(sa_select(User).where(User.telegram_id == user_id))
+            user = result.scalar_one_or_none()
+            if not user or user.units <= 0:
+                return web.json_response({"error": "No subscription"}, status=403)
+            comment = await add_comment(session, content_id, user_id, user.username, text)
+            return web.json_response({
+                "ok": True,
+                "comment": {
+                    "id": comment.id,
+                    "username": comment.username or "Anonymous",
+                    "text": comment.text,
+                    "created_at": comment.created_at.strftime("%d.%m %H:%M"),
+                }
+            })
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 def create_app() -> web.Application:
     app = web.Application()
     app.middlewares.append(cors_middleware)
@@ -456,4 +570,9 @@ def create_app() -> web.Application:
     app.router.add_post("/miniapp/favorites/delete", api_delete_favorite)
     app.router.add_post("/miniapp/free_trial", api_free_trial)
     app.router.add_get("/miniapp/artist_content", api_get_artist_content)
+    app.router.add_get("/miniapp/tags", api_get_tags)
+    app.router.add_get("/miniapp/video/{id}/reactions", api_get_video_reactions)
+    app.router.add_post("/miniapp/video/{id}/react", api_post_reaction)
+    app.router.add_get("/miniapp/video/{id}/comments", api_get_comments)
+    app.router.add_post("/miniapp/video/{id}/comment", api_post_comment)
     return app

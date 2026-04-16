@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, Video, create_video, get_all_videos, delete_video, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts
+from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, Video, create_video, get_all_videos, delete_video, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts, Tag, get_all_tags, get_tag, create_tag, delete_tag
 from handlers.group import enable_night_mode, disable_night_mode
 from config import ADMIN_IDS, GROUP_ID, INVITE_LINK
 
@@ -304,6 +304,71 @@ async def cmd_set_units(message: Message, session: AsyncSession, bot: Bot):
     await message.reply(f"✅ Пользователю {user_id} установлено {days} дней.")
 
 
+# ─── /add_tag, /list_tags, /del_tag ──────────────────────────────────────────
+
+@router.message(Command("add_tag"))
+async def cmd_add_tag(message: Message, session: AsyncSession):
+    """Usage: /add_tag Ear Licking | #FF5050"""
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2 or "|" not in args[1]:
+        await message.reply(
+            "Использование: /add_tag Название | #HEX\n"
+            "Пример: <code>/add_tag Ear Licking | #FF5050</code>",
+            parse_mode="HTML"
+        )
+        return
+    parts = [p.strip() for p in args[1].split("|", 1)]
+    name, color = parts[0], parts[1]
+    if not color.startswith("#") or len(color) not in (4, 7):
+        await message.reply("⚠️ Цвет должен быть в формате #RGB или #RRGGBB, например <code>#FF5050</code>", parse_mode="HTML")
+        return
+    existing = await get_tag(session, name)
+    if existing:
+        await message.reply(f"❌ Тег <b>{name}</b> уже существует (цвет: <code>{existing.color}</code>)", parse_mode="HTML")
+        return
+    tag = await create_tag(session, name, color)
+    await message.reply(
+        f"✅ Тег создан!\n"
+        f"Имя: <b>{tag.name}</b>\n"
+        f"Цвет: <code>{tag.color}</code>",
+        parse_mode="HTML"
+    )
+
+
+@router.message(Command("list_tags"))
+async def cmd_list_tags(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+    tags = await get_all_tags(session)
+    if not tags:
+        await message.reply("📭 Теги не найдены. Создай: /add_tag Название | #HEX")
+        return
+    lines = ["🏷 <b>Все теги:</b>\n"]
+    for t in tags:
+        lines.append(f"  • <b>{t.name}</b> — <code>{t.color}</code>")
+    lines.append(f"\nВсего: {len(tags)}")
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("del_tag"))
+async def cmd_del_tag(message: Message, session: AsyncSession):
+    """Usage: /del_tag Ear Licking"""
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.reply("Использование: /del_tag Название")
+        return
+    name = args[1].strip()
+    deleted = await delete_tag(session, name)
+    if deleted:
+        await message.reply(f"🗑 Тег <b>{name}</b> удалён.", parse_mode="HTML")
+    else:
+        await message.reply(f"❌ Тег <b>{name}</b> не найден.", parse_mode="HTML")
+
+
 # ─── /set_cont — Управление артистами ─────────────────────────────────────────
 
 @router.message(Command("set_cont"))
@@ -326,7 +391,11 @@ async def cmd_set_cont(message: Message):
         "/add_cont [имя] — загрузить видео/фото артисту\n"
         "/list_cont [имя] — показать контент артиста\n"
         "/clear_cont [имя] videos|photos|all — очистить контент\n\n"
-        "Теги:\n"
+        "🏷 Теги (для видео):\n"
+        "/add_tag Название | #HEX — создать тег с цветом\n"
+        "/list_tags — все теги\n"
+        "/del_tag Название — удалить тег\n\n"
+        "Теги артиста:\n"
         "/artist_hot_on [имя] — добавить тег HOT\n"
         "/artist_hot_off [имя] — убрать тег HOT\n"
         "/artist_new_on [имя] — добавить тег NEW\n"

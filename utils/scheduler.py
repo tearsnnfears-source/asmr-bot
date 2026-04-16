@@ -104,22 +104,18 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         CronTrigger(hour=0, minute=1, timezone="Europe/Moscow"),
         args=[bot],
         id="daily_check",
-
-    # Включение ночного режима
-    #scheduler.add_job(
-    #    enable_night_mode,
-    #    CronTrigger(hour=NIGHT_START, minute=0, timezone="Europe/Moscow"),
-    #    args=[bot],
-    #    id="night_on",
-    #)
-
-    # Выключение ночного режима
-    #scheduler.add_job(
-    #    disable_night_mode,
-    #    CronTrigger(hour=NIGHT_END, minute=0, timezone="Europe/Moscow"),
-    #    args=[bot],
-    #    id="night_off",
-    #
     )
+
+    # Включение ночного режима (раскомментировать при необходимости)
+    # scheduler.add_job(
+    #     enable_night_mode,
+    #     CronTrigger(hour=NIGHT_START, minute=0, timezone="Europe/Moscow"),
+    #     args=[bot], id="night_on",
+    # )
+    # scheduler.add_job(
+    #     disable_night_mode,
+    #     CronTrigger(hour=NIGHT_END, minute=0, timezone="Europe/Moscow"),
+    #     args=[bot], id="night_off",
+    # )
 
     return scheduler

@@ -72,6 +72,36 @@ class ArtistContent(Base):
     created_at:   Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class Tag(Base):
+    __tablename__ = "tags"
+
+    id:         Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name:       Mapped[str]      = mapped_column(String(64), unique=True, index=True)
+    color:      Mapped[str]      = mapped_column(String(16), default="#FFFFFF")  # hex
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class VideoReaction(Base):
+    __tablename__ = "video_reactions"
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    content_id:  Mapped[int]      = mapped_column(Integer, index=True)
+    telegram_id: Mapped[int]      = mapped_column(BigInteger, index=True)
+    emoji:       Mapped[str]      = mapped_column(String(8))
+    created_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class VideoComment(Base):
+    __tablename__ = "video_comments"
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    content_id:  Mapped[int]      = mapped_column(Integer, index=True)
+    telegram_id: Mapped[int]      = mapped_column(BigInteger, index=True)
+    username:    Mapped[str|None] = mapped_column(String(64), nullable=True)
+    text:        Mapped[str]      = mapped_column(Text)
+    created_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Artist(Base):
     __tablename__ = "artists"
 
@@ -127,6 +157,11 @@ async def init_db():
             "ALTER TABLE artists ADD COLUMN IF NOT EXISTS topic_url VARCHAR(512)",
             "CREATE TABLE IF NOT EXISTS artist_content (id SERIAL PRIMARY KEY, artist_name VARCHAR(128), content_type VARCHAR(8), title VARCHAR(256), url TEXT, tags VARCHAR(256), sort_order INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW())",
             "CREATE INDEX IF NOT EXISTS idx_artist_content_name ON artist_content (artist_name)",
+            "CREATE TABLE IF NOT EXISTS tags (id SERIAL PRIMARY KEY, name VARCHAR(64) UNIQUE, color VARCHAR(16) DEFAULT '#FFFFFF', created_at TIMESTAMP DEFAULT NOW())",
+            "CREATE TABLE IF NOT EXISTS video_reactions (id SERIAL PRIMARY KEY, content_id INTEGER, telegram_id BIGINT, emoji VARCHAR(8), created_at TIMESTAMP DEFAULT NOW())",
+            "CREATE INDEX IF NOT EXISTS idx_reactions_content ON video_reactions (content_id)",
+            "CREATE TABLE IF NOT EXISTS video_comments (id SERIAL PRIMARY KEY, content_id INTEGER, telegram_id BIGINT, username VARCHAR(64), text TEXT, created_at TIMESTAMP DEFAULT NOW())",
+            "CREATE INDEX IF NOT EXISTS idx_comments_content ON video_comments (content_id)",
         ]
         try:
             async with engine.begin() as conn:
@@ -350,3 +385,107 @@ async def get_artist_content_counts(session: AsyncSession, artist_name: str) -> 
     for ct, cnt in result.all():
         counts[ct] = cnt
     return counts
+
+
+# ─── Tag CRUD ─────────────────────────────────────────────────────────────────
+
+async def get_all_tags(session: AsyncSession) -> list[Tag]:
+    from sqlalchemy import select
+    result = await session.execute(select(Tag).order_by(Tag.name))
+    return list(result.scalars().all())
+
+
+async def get_tag(session: AsyncSession, name: str) -> Tag | None:
+    from sqlalchemy import select
+    result = await session.execute(select(Tag).where(Tag.name == name))
+    return result.scalar_one_or_none()
+
+
+async def create_tag(session: AsyncSession, name: str, color: str) -> Tag:
+    tag = Tag(name=name, color=color)
+    session.add(tag)
+    await session.commit()
+    await session.refresh(tag)
+    return tag
+
+
+async def delete_tag(session: AsyncSession, name: str) -> bool:
+    tag = await get_tag(session, name)
+    if tag:
+        await session.delete(tag)
+        await session.commit()
+        return True
+    return False
+
+
+# ─── Reaction CRUD ────────────────────────────────────────────────────────────
+
+ALLOWED_REACTIONS = ["🔥", "❤️", "😮", "💦", "👅"]
+
+
+async def get_reactions(session: AsyncSession, content_id: int) -> dict:
+    """Returns {emoji: count, ...} and total."""
+    from sqlalchemy import select, func
+    result = await session.execute(
+        select(VideoReaction.emoji, func.count(VideoReaction.id))
+        .where(VideoReaction.content_id == content_id)
+        .group_by(VideoReaction.emoji)
+    )
+    counts = {r[0]: r[1] for r in result.all()}
+    return counts
+
+
+async def get_user_reaction(session: AsyncSession, content_id: int, telegram_id: int) -> str | None:
+    from sqlalchemy import select
+    result = await session.execute(
+        select(VideoReaction).where(
+            VideoReaction.content_id == content_id,
+            VideoReaction.telegram_id == telegram_id,
+        )
+    )
+    r = result.scalar_one_or_none()
+    return r.emoji if r else None
+
+
+async def set_reaction(session: AsyncSession, content_id: int, telegram_id: int, emoji: str) -> dict:
+    """Toggle reaction — same emoji removes it, different emoji replaces it."""
+    from sqlalchemy import select
+    result = await session.execute(
+        select(VideoReaction).where(
+            VideoReaction.content_id == content_id,
+            VideoReaction.telegram_id == telegram_id,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        if existing.emoji == emoji:
+            await session.delete(existing)  # toggle off
+        else:
+            existing.emoji = emoji
+    else:
+        session.add(VideoReaction(content_id=content_id, telegram_id=telegram_id, emoji=emoji))
+    await session.commit()
+    return await get_reactions(session, content_id)
+
+
+# ─── Comment CRUD ─────────────────────────────────────────────────────────────
+
+async def get_comments(session: AsyncSession, content_id: int, limit: int = 50) -> list[VideoComment]:
+    from sqlalchemy import select
+    result = await session.execute(
+        select(VideoComment)
+        .where(VideoComment.content_id == content_id)
+        .order_by(VideoComment.created_at.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())
+
+
+async def add_comment(session: AsyncSession, content_id: int, telegram_id: int,
+                      username: str | None, text: str) -> VideoComment:
+    comment = VideoComment(content_id=content_id, telegram_id=telegram_id,
+                           username=username, text=text[:500])
+    session.add(comment)
+    await session.commit()
+    await session.refresh(comment)
+    return comment

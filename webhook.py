@@ -8,7 +8,7 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select
 
-from database import async_session, User, PendingPayment, Artist, get_all_artists, Video, get_all_videos, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS
+from database import async_session, User, PendingPayment, Artist, get_all_artists, Video, get_all_videos, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion
 from config import TRIBUTE_API_KEY, BOT_TOKEN, INVITE_LINK, STARS_PRICES, RUB_PRICES
 from utils.yoomoney import make_payment_url, generate_label
 
@@ -567,6 +567,325 @@ async def api_post_comment(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def api_suggest_artist(request: web.Request) -> web.Response:
+    """POST /miniapp/suggest_artist {initData, artist_name}"""
+    try:
+        data = await request.json()
+        init_data = data.get("initData", "")
+        artist_name = data.get("artist_name", "").strip()
+        user_id = _parse_user_id(init_data)
+        if not user_id:
+            return web.json_response({"error": "Cannot parse user"}, status=403)
+        if not artist_name or len(artist_name) > 256:
+            return web.json_response({"error": "Invalid artist name"}, status=400)
+
+        # Get username
+        params = dict(urllib.parse.parse_qsl(init_data))
+        username = None
+        try:
+            username = json.loads(params.get('user', '{}')).get('username')
+        except Exception:
+            pass
+
+        async with async_session() as session:
+            sug = ArtistSuggestion(telegram_id=user_id, username=username, artist_name=artist_name)
+            session.add(sug)
+            await session.commit()
+
+        # Notify admins via bot
+        nick = f"@{username}" if username else f"id{user_id}"
+        await _notify_admins(
+            f"💡 <b>Предложение артиста</b>\n"
+            f"👤 {nick} | <code>{user_id}</code>\n"
+            f"🎤 <b>{artist_name}</b>"
+        )
+        return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def api_toggle_favorite(request: web.Request) -> web.Response:
+    """POST /miniapp/favorites/toggle {initData, content_id, title, url}"""
+    try:
+        data = await request.json()
+        init_data = data.get("initData", "")
+        content_id = data.get("content_id")
+        user_id = _parse_user_id(init_data)
+        if not user_id or not content_id:
+            return web.json_response({"error": "Missing data"}, status=400)
+
+        async with async_session() as session:
+            result = await session.execute(select(User).where(User.telegram_id == user_id))
+            user = result.scalar_one_or_none()
+            if not user or user.units <= 0:
+                return web.json_response({"error": "No subscription"}, status=403)
+
+            # Check if already favorited
+            result = await session.execute(
+                select(Favorite).where(Favorite.telegram_id == user_id, Favorite.content_id == content_id)
+            )
+            existing = result.scalar_one_or_none()
+            if existing:
+                await session.delete(existing)
+                await session.commit()
+                return web.json_response({"ok": True, "favorited": False})
+            else:
+                # Check limit
+                from sqlalchemy import func as sa_func
+                count_result = await session.execute(
+                    select(sa_func.count(Favorite.id)).where(Favorite.telegram_id == user_id)
+                )
+                if (count_result.scalar() or 0) >= 200:
+                    return web.json_response({"error": "Limit reached"}, status=409)
+                fav = Favorite(
+                    telegram_id=user_id,
+                    content_id=content_id,
+                    title=data.get("title", "Video")[:128],
+                    url=data.get("url", ""),
+                )
+                session.add(fav)
+                await session.commit()
+                return web.json_response({"ok": True, "favorited": True})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def api_check_favorite(request: web.Request) -> web.Response:
+    """GET /miniapp/favorites/check?initData=...&content_id=..."""
+    init_data = request.rel_url.query.get("initData", "")
+    content_id = request.rel_url.query.get("content_id", "")
+    user_id = _parse_user_id(init_data) if init_data else None
+    if not user_id or not content_id:
+        return web.json_response({"favorited": False})
+    async with async_session() as session:
+        result = await session.execute(
+            select(Favorite).where(Favorite.telegram_id == user_id, Favorite.content_id == int(content_id))
+        )
+        return web.json_response({"favorited": result.scalar_one_or_none() is not None})
+
+
+async def api_get_favorites_v2(request: web.Request) -> web.Response:
+    """POST /miniapp/favorites  — returns favorites with content details"""
+    try:
+        data = await request.json()
+        init_data = data.get("initData", "")
+        user_id = _parse_user_id(init_data)
+        if not user_id:
+            return web.json_response({"error": "Cannot parse user"}, status=403)
+
+        async with async_session() as session:
+            result = await session.execute(select(User).where(User.telegram_id == user_id))
+            user = result.scalar_one_or_none()
+            if not user or user.units <= 0:
+                return web.json_response({"error": "No subscription"}, status=403)
+
+            result = await session.execute(
+                select(Favorite).where(Favorite.telegram_id == user_id).order_by(Favorite.created_at.desc())
+            )
+            favorites = result.scalars().all()
+
+            # Enrich with content details
+            items = []
+            content_ids = [f.content_id for f in favorites if f.content_id]
+            content_map = {}
+            if content_ids:
+                cr = await session.execute(
+                    select(ArtistContent).where(ArtistContent.id.in_(content_ids))
+                )
+                for c in cr.scalars().all():
+                    content_map[c.id] = c
+
+            for f in favorites:
+                item = {"id": f.id, "title": f.title, "url": f.url, "content_id": f.content_id}
+                if f.content_id and f.content_id in content_map:
+                    c = content_map[f.content_id]
+                    item.update({
+                        "artist_name": c.artist_name,
+                        "thumbnail_url": c.thumbnail_url or "",
+                        "tags": c.tags or "",
+                    })
+                items.append(item)
+            return web.json_response({"items": items, "count": len(items), "limit": 200})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+# ─── Playlists API ────────────────────────────────────────────────────────────
+
+async def api_get_playlists(request: web.Request) -> web.Response:
+    """POST /miniapp/playlists {initData}"""
+    try:
+        data = await request.json()
+        user_id = _parse_user_id(data.get("initData", ""))
+        if not user_id:
+            return web.json_response({"error": "Cannot parse user"}, status=403)
+        async with async_session() as session:
+            result = await session.execute(
+                select(Playlist).where(Playlist.telegram_id == user_id).order_by(Playlist.created_at.desc())
+            )
+            playlists = result.scalars().all()
+            # Count items per playlist
+            items_out = []
+            for pl in playlists:
+                from sqlalchemy import func as sa_func
+                count_r = await session.execute(
+                    select(sa_func.count(PlaylistItem.id)).where(PlaylistItem.playlist_id == pl.id)
+                )
+                items_out.append({
+                    "id": pl.id, "name": pl.name,
+                    "item_count": count_r.scalar() or 0,
+                    "created_at": pl.created_at.strftime("%d.%m.%Y"),
+                })
+            return web.json_response({"playlists": items_out})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def api_create_playlist(request: web.Request) -> web.Response:
+    """POST /miniapp/playlists/create {initData, name}"""
+    try:
+        data = await request.json()
+        user_id = _parse_user_id(data.get("initData", ""))
+        name = data.get("name", "").strip()
+        if not user_id or not name:
+            return web.json_response({"error": "Missing data"}, status=400)
+        async with async_session() as session:
+            # Limit 20 playlists
+            from sqlalchemy import func as sa_func
+            count_r = await session.execute(
+                select(sa_func.count(Playlist.id)).where(Playlist.telegram_id == user_id)
+            )
+            if (count_r.scalar() or 0) >= 20:
+                return web.json_response({"error": "Max 20 playlists"}, status=409)
+            pl = Playlist(telegram_id=user_id, name=name[:128])
+            session.add(pl)
+            await session.commit()
+            await session.refresh(pl)
+            return web.json_response({"ok": True, "id": pl.id, "name": pl.name})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def api_delete_playlist(request: web.Request) -> web.Response:
+    """POST /miniapp/playlists/delete {initData, playlist_id}"""
+    try:
+        data = await request.json()
+        user_id = _parse_user_id(data.get("initData", ""))
+        playlist_id = data.get("playlist_id")
+        if not user_id or not playlist_id:
+            return web.json_response({"error": "Missing data"}, status=400)
+        async with async_session() as session:
+            result = await session.execute(
+                select(Playlist).where(Playlist.id == playlist_id, Playlist.telegram_id == user_id)
+            )
+            pl = result.scalar_one_or_none()
+            if not pl:
+                return web.json_response({"error": "Not found"}, status=404)
+            from sqlalchemy import delete as sa_delete
+            await session.execute(sa_delete(PlaylistItem).where(PlaylistItem.playlist_id == pl.id))
+            await session.delete(pl)
+            await session.commit()
+            return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def api_playlist_add_item(request: web.Request) -> web.Response:
+    """POST /miniapp/playlists/add_item {initData, playlist_id, content_id}"""
+    try:
+        data = await request.json()
+        user_id = _parse_user_id(data.get("initData", ""))
+        playlist_id = data.get("playlist_id")
+        content_id = data.get("content_id")
+        if not user_id or not playlist_id or not content_id:
+            return web.json_response({"error": "Missing data"}, status=400)
+        async with async_session() as session:
+            result = await session.execute(
+                select(Playlist).where(Playlist.id == playlist_id, Playlist.telegram_id == user_id)
+            )
+            if not result.scalar_one_or_none():
+                return web.json_response({"error": "Not found"}, status=404)
+            # Check duplicate
+            result = await session.execute(
+                select(PlaylistItem).where(PlaylistItem.playlist_id == playlist_id, PlaylistItem.content_id == content_id)
+            )
+            if result.scalar_one_or_none():
+                return web.json_response({"error": "Already in playlist"}, status=409)
+            item = PlaylistItem(playlist_id=playlist_id, content_id=content_id)
+            session.add(item)
+            await session.commit()
+            return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def api_playlist_remove_item(request: web.Request) -> web.Response:
+    """POST /miniapp/playlists/remove_item {initData, playlist_id, content_id}"""
+    try:
+        data = await request.json()
+        user_id = _parse_user_id(data.get("initData", ""))
+        playlist_id = data.get("playlist_id")
+        content_id = data.get("content_id")
+        if not user_id or not playlist_id or not content_id:
+            return web.json_response({"error": "Missing data"}, status=400)
+        async with async_session() as session:
+            result = await session.execute(
+                select(Playlist).where(Playlist.id == playlist_id, Playlist.telegram_id == user_id)
+            )
+            if not result.scalar_one_or_none():
+                return web.json_response({"error": "Not found"}, status=404)
+            from sqlalchemy import delete as sa_delete
+            await session.execute(
+                sa_delete(PlaylistItem).where(
+                    PlaylistItem.playlist_id == playlist_id,
+                    PlaylistItem.content_id == content_id,
+                )
+            )
+            await session.commit()
+            return web.json_response({"ok": True})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def api_playlist_items(request: web.Request) -> web.Response:
+    """POST /miniapp/playlists/items {initData, playlist_id}"""
+    try:
+        data = await request.json()
+        user_id = _parse_user_id(data.get("initData", ""))
+        playlist_id = data.get("playlist_id")
+        if not user_id or not playlist_id:
+            return web.json_response({"error": "Missing data"}, status=400)
+        async with async_session() as session:
+            result = await session.execute(
+                select(Playlist).where(Playlist.id == playlist_id, Playlist.telegram_id == user_id)
+            )
+            pl = result.scalar_one_or_none()
+            if not pl:
+                return web.json_response({"error": "Not found"}, status=404)
+            result = await session.execute(
+                select(PlaylistItem).where(PlaylistItem.playlist_id == playlist_id).order_by(PlaylistItem.created_at.desc())
+            )
+            p_items = result.scalars().all()
+            content_ids = [i.content_id for i in p_items]
+            content_map = {}
+            if content_ids:
+                cr = await session.execute(select(ArtistContent).where(ArtistContent.id.in_(content_ids)))
+                for c in cr.scalars().all():
+                    content_map[c.id] = c
+            items_out = []
+            for pi in p_items:
+                c = content_map.get(pi.content_id)
+                if c:
+                    items_out.append({
+                        "id": c.id, "title": c.title or "", "url": c.url,
+                        "artist_name": c.artist_name, "tags": c.tags or "",
+                        "thumbnail_url": c.thumbnail_url or "",
+                    })
+            return web.json_response({"playlist": {"id": pl.id, "name": pl.name}, "items": items_out})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 def create_app() -> web.Application:
     app = web.Application()
     app.middlewares.append(cors_middleware)
@@ -578,10 +897,19 @@ def create_app() -> web.Application:
     app.router.add_post("/miniapp/profile", api_get_profile)
     app.router.add_post("/miniapp/set_language", api_set_language)
     app.router.add_post("/miniapp/set_notify_expiry", api_set_notify_expiry)
-    app.router.add_post("/miniapp/favorites", api_get_favorites)
+    app.router.add_post("/miniapp/favorites", api_get_favorites_v2)
     app.router.add_post("/miniapp/favorites/add", api_add_favorite)
     app.router.add_post("/miniapp/favorites/delete", api_delete_favorite)
+    app.router.add_post("/miniapp/favorites/toggle", api_toggle_favorite)
+    app.router.add_get("/miniapp/favorites/check", api_check_favorite)
     app.router.add_post("/miniapp/free_trial", api_free_trial)
+    app.router.add_post("/miniapp/suggest_artist", api_suggest_artist)
+    app.router.add_post("/miniapp/playlists", api_get_playlists)
+    app.router.add_post("/miniapp/playlists/create", api_create_playlist)
+    app.router.add_post("/miniapp/playlists/delete", api_delete_playlist)
+    app.router.add_post("/miniapp/playlists/add_item", api_playlist_add_item)
+    app.router.add_post("/miniapp/playlists/remove_item", api_playlist_remove_item)
+    app.router.add_post("/miniapp/playlists/items", api_playlist_items)
     app.router.add_get("/miniapp/artist_content", api_get_artist_content)
     app.router.add_get("/miniapp/tags", api_get_tags)
     app.router.add_get("/miniapp/video/{id}/reactions", api_get_video_reactions)

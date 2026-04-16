@@ -1,7 +1,8 @@
 import logging
 from aiogram import Router, Bot, F
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -194,6 +195,161 @@ async def cmd_admin_help(message: Message):
         "/add_cont Moona ASMR — бот сразу спросит тип контента\n"
         "Затем принимает все данные одним сообщением."
     )
+
+
+# ─── /broadcast — рассылка пользователям ──────────────────────────────────────
+
+from aiogram.fsm.state import State, StatesGroup as _SG
+
+class BroadcastForm(_SG):
+    content  = State()
+    buttons  = State()
+    confirm  = State()
+
+
+@router.message(Command("broadcast"))
+async def cmd_broadcast(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    await state.clear()
+    await state.set_state(BroadcastForm.content)
+    await message.answer(
+        "📢 <b>Рассылка</b>\n\n"
+        "Шаг 1/3 — Отправь сообщение для рассылки.\n\n"
+        "Поддерживается:\n"
+        "• Текст (HTML)\n"
+        "• Фото с подписью\n"
+        "• Custom emoji: <code>&lt;tg-emoji emoji-id=\"ID\"&gt;👍&lt;/tg-emoji&gt;</code>",
+        parse_mode="HTML",
+    )
+
+
+@router.message(BroadcastForm.content)
+async def broadcast_got_content(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    data = {}
+    if message.photo:
+        data["photo"] = message.photo[-1].file_id
+        data["text"] = message.caption or ""
+    else:
+        data["text"] = message.text or ""
+    await state.update_data(**data)
+    await state.set_state(BroadcastForm.buttons)
+    await message.answer(
+        "Шаг 2/3 — Кнопки (необязательно).\n\n"
+        "Формат: <code>Текст | URL</code>\n"
+        "Несколько в ряд: <code>Кнопка1 | url1 ;; Кнопка2 | url2</code>\n"
+        "Новая строка = новый ряд.\n\n"
+        "Или отправь <code>-</code> без кнопок.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(BroadcastForm.buttons)
+async def broadcast_got_buttons(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    raw = message.text.strip()
+    kb = None
+    if raw not in ("-", "нет", "no", "skip"):
+        rows = []
+        for line in raw.splitlines():
+            row = []
+            for part in line.split(";;"):
+                part = part.strip()
+                if "|" not in part:
+                    continue
+                pieces = [p.strip() for p in part.split("|", 1)]
+                if len(pieces) == 2 and pieces[0] and pieces[1]:
+                    row.append(InlineKeyboardButton(text=pieces[0], url=pieces[1]))
+            if row:
+                rows.append(row)
+        if rows:
+            kb = InlineKeyboardMarkup(inline_keyboard=rows)
+
+    await state.update_data(keyboard=kb)
+    await state.set_state(BroadcastForm.confirm)
+
+    data = await state.get_data()
+    text = data.get("text", "")
+    photo = data.get("photo")
+
+    # Preview
+    try:
+        if photo:
+            await message.answer_photo(
+                photo=photo, caption="👀 <b>Предпросмотр:</b>\n\n" + text,
+                reply_markup=kb, parse_mode="HTML",
+            )
+        else:
+            await message.answer(
+                "👀 <b>Предпросмотр:</b>\n\n" + text,
+                reply_markup=kb, parse_mode="HTML",
+            )
+    except Exception as e:
+        await message.answer(f"⚠️ Ошибка предпросмотра: {e}")
+        return
+
+    await message.answer(
+        "Отправить рассылку?",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Отправить всем", callback_data="broadcast_send")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")],
+        ])
+    )
+
+
+@router.callback_query(F.data == "broadcast_send", BroadcastForm.confirm)
+async def broadcast_confirm(call: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
+    data = await state.get_data()
+    await state.clear()
+
+    text = data.get("text", "")
+    photo = data.get("photo")
+    kb = data.get("keyboard")
+
+    # Get all users
+    from sqlalchemy import select as sa_select
+    result = await session.execute(sa_select(User.telegram_id))
+    user_ids = [r[0] for r in result.all()]
+
+    await call.message.edit_text(f"📤 Рассылка начата... 0/{len(user_ids)}")
+    await call.answer()
+
+    sent, failed = 0, 0
+    for i, uid in enumerate(user_ids):
+        try:
+            if photo:
+                await bot.send_photo(uid, photo=photo, caption=text,
+                                     reply_markup=kb, parse_mode="HTML")
+            else:
+                await bot.send_message(uid, text, reply_markup=kb, parse_mode="HTML")
+            sent += 1
+        except Exception:
+            failed += 1
+        if (i + 1) % 25 == 0:
+            try:
+                await call.message.edit_text(f"📤 Рассылка... {i+1}/{len(user_ids)} (✅ {sent} / ❌ {failed})")
+            except Exception:
+                pass
+            import asyncio
+            await asyncio.sleep(0.5)  # Rate limit
+
+    await call.message.edit_text(
+        f"✅ <b>Рассылка завершена!</b>\n\n"
+        f"📤 Всего: {len(user_ids)}\n"
+        f"✅ Доставлено: {sent}\n"
+        f"❌ Ошибок: {failed}",
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "broadcast_cancel", BroadcastForm.confirm)
+async def broadcast_cancel(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("❌ Рассылка отменена.")
+    await call.answer()
 
 
 # ─── Вспомогательная функция ──────────────────────────────────────────────────

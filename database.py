@@ -54,8 +54,37 @@ class Favorite(Base):
 
     id:          Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
     telegram_id: Mapped[int]      = mapped_column(BigInteger, index=True)
+    content_id:  Mapped[int|None] = mapped_column(Integer, nullable=True, index=True)  # ArtistContent.id
     title:       Mapped[str]      = mapped_column(String(128))
     url:         Mapped[str]      = mapped_column(Text)
+    created_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Playlist(Base):
+    __tablename__ = "playlists"
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_id: Mapped[int]      = mapped_column(BigInteger, index=True)
+    name:        Mapped[str]      = mapped_column(String(128))
+    created_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PlaylistItem(Base):
+    __tablename__ = "playlist_items"
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    playlist_id: Mapped[int]      = mapped_column(Integer, index=True)
+    content_id:  Mapped[int]      = mapped_column(Integer, index=True)
+    created_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ArtistSuggestion(Base):
+    __tablename__ = "artist_suggestions"
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_id: Mapped[int]      = mapped_column(BigInteger)
+    username:    Mapped[str|None] = mapped_column(String(64), nullable=True)
+    artist_name: Mapped[str]      = mapped_column(String(256))
     created_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -166,6 +195,12 @@ async def init_db():
             "CREATE TABLE IF NOT EXISTS video_comments (id SERIAL PRIMARY KEY, content_id INTEGER, telegram_id BIGINT, username VARCHAR(64), photo_url TEXT, text TEXT, created_at TIMESTAMP DEFAULT NOW())",
             "ALTER TABLE video_comments ADD COLUMN IF NOT EXISTS photo_url TEXT",
             "CREATE INDEX IF NOT EXISTS idx_comments_content ON video_comments (content_id)",
+            "ALTER TABLE favorites ADD COLUMN IF NOT EXISTS content_id INTEGER",
+            "CREATE TABLE IF NOT EXISTS playlists (id SERIAL PRIMARY KEY, telegram_id BIGINT, name VARCHAR(128), created_at TIMESTAMP DEFAULT NOW())",
+            "CREATE INDEX IF NOT EXISTS idx_playlists_user ON playlists (telegram_id)",
+            "CREATE TABLE IF NOT EXISTS playlist_items (id SERIAL PRIMARY KEY, playlist_id INTEGER, content_id INTEGER, created_at TIMESTAMP DEFAULT NOW())",
+            "CREATE INDEX IF NOT EXISTS idx_playlist_items_pl ON playlist_items (playlist_id)",
+            "CREATE TABLE IF NOT EXISTS artist_suggestions (id SERIAL PRIMARY KEY, telegram_id BIGINT, username VARCHAR(64), artist_name VARCHAR(256), created_at TIMESTAMP DEFAULT NOW())",
         ]
         try:
             async with engine.begin() as conn:

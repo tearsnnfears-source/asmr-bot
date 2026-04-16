@@ -1024,13 +1024,13 @@ async def setcont_got_mode(call, state: FSMContext):
     if data["ctype"] == "video":
         hint = (
             "Шаг 4/4 — Отправь список видео, <b>одно на строку</b>:\n\n"
-            "<code>Название | URL | ТЕГИ</code>\n\n"
-            "Теги (необязательно) через запятую:\n"
-            "<code>HOT</code> · <code>NEW</code> · <code>EXCLUSIVE</code> · <code>FREE</code>\n\n"
+            "<code>Название | URL | ТЕГИ | THUMBNAIL</code>\n\n"
+            "• ТЕГИ — через запятую (необязательно)\n"
+            "• THUMBNAIL — ссылка на превью-картинку (необязательно)\n\n"
             "Пример:\n"
-            "<code>Night ASMR Rain | https://example.com/v1 | HOT,NEW\n"
-            "Whisper Triggers | https://example.com/v2 | EXCLUSIVE\n"
-            "Soft Tapping | https://example.com/v3</code>"
+            "<code>Night ASMR Rain | https://files.asmrleaks.tv/v1.m3u8 | Licking,HOT | https://img.asmrleaks.tv/v1.jpg\n"
+            "Whisper Triggers | https://files.asmrleaks.tv/v2.m3u8 | ASMR\n"
+            "Soft Tapping | https://files.asmrleaks.tv/v3.m3u8</code>"
         )
     else:
         hint = (
@@ -1076,12 +1076,17 @@ async def setcont_got_content(message: Message, state: FSMContext, session: Asyn
                     continue
                 title = parts[0]
                 url = parts[1]
-                tags = parts[2].upper() if len(parts) >= 3 else None
+                tags = parts[2] if len(parts) >= 3 and parts[2] else None
+                thumb = parts[3] if len(parts) >= 4 and parts[3] else None
                 if not url.startswith("http"):
                     errors.append(f"Строка {i+1}: невалидный URL")
                     continue
+                if thumb and not thumb.startswith("http"):
+                    errors.append(f"Строка {i+1}: невалидный thumbnail URL")
+                    continue
                 await add_artist_content(session, artist_name, "video",
-                                          url=url, title=title, tags=tags, sort_order=i)
+                                          url=url, title=title, tags=tags,
+                                          sort_order=i, thumbnail_url=thumb)
             else:
                 url = line
                 if not url.startswith("http"):

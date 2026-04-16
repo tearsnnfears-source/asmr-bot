@@ -8,7 +8,7 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select
 
-from database import async_session, User, PendingPayment, Artist, get_all_artists, Video, get_all_videos, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS
+from database import async_session, User, PendingPayment, Artist, get_all_artists, Video, get_all_videos, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS
 from config import TRIBUTE_API_KEY, BOT_TOKEN, INVITE_LINK, STARS_PRICES, RUB_PRICES
 from utils.yoomoney import make_payment_url, generate_label
 
@@ -430,6 +430,7 @@ async def api_get_artist_content(request: web.Request) -> web.Response:
         "artist": artist_name,
         "videos": [
             {"id": v.id, "title": v.title or "", "url": v.url,
+             "thumbnail_url": v.thumbnail_url or "",
              "tags": v.tags or "", "sort_order": v.sort_order}
             for v in videos
         ],
@@ -465,14 +466,15 @@ async def api_get_video_reactions(request: web.Request) -> web.Response:
 
     async with async_session() as session:
         counts = await get_reactions(session, content_id)
-        user_reaction = None
+        user_reactions = []
         if user_id:
-            user_reaction = await get_user_reaction(session, content_id, user_id)
+            user_reactions = await get_user_reactions(session, content_id, user_id)
         return web.json_response({
             "content_id": content_id,
             "counts": counts,
-            "user_reaction": user_reaction,
+            "user_reactions": user_reactions,   # list of emojis
             "allowed": ALLOWED_REACTIONS,
+            "max_per_user": 3,
         })
 
 
@@ -497,8 +499,8 @@ async def api_post_reaction(request: web.Request) -> web.Response:
             if not user or user.units <= 0:
                 return web.json_response({"error": "No subscription"}, status=403)
             counts = await set_reaction(session, content_id, user_id, emoji)
-            user_reaction = await get_user_reaction(session, content_id, user_id)
-            return web.json_response({"counts": counts, "user_reaction": user_reaction})
+            user_reactions = await get_user_reactions(session, content_id, user_id)
+            return web.json_response({"counts": counts, "user_reactions": user_reactions})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
@@ -513,10 +515,11 @@ async def api_get_comments(request: web.Request) -> web.Response:
                 {
                     "id": c.id,
                     "username": c.username or "Anonymous",
+                    "photo_url": c.photo_url or "",
                     "text": c.text,
                     "created_at": c.created_at.strftime("%d.%m %H:%M"),
                 }
-                for c in reversed(comments)  # oldest first
+                for c in reversed(comments)
             ]
         })
 
@@ -534,18 +537,28 @@ async def api_post_comment(request: web.Request) -> web.Response:
         if not text:
             return web.json_response({"error": "Empty comment"}, status=400)
 
+        # Extract photo_url from initData user object
+        photo_url = None
+        try:
+            params = dict(urllib.parse.parse_qsl(init_data))
+            user_obj = json.loads(params.get('user', '{}'))
+            photo_url = user_obj.get('photo_url') or None
+        except Exception:
+            pass
+
         async with async_session() as session:
             from sqlalchemy import select as sa_select
             result = await session.execute(sa_select(User).where(User.telegram_id == user_id))
             user = result.scalar_one_or_none()
             if not user or user.units <= 0:
                 return web.json_response({"error": "No subscription"}, status=403)
-            comment = await add_comment(session, content_id, user_id, user.username, text)
+            comment = await add_comment(session, content_id, user_id, user.username, text, photo_url)
             return web.json_response({
                 "ok": True,
                 "comment": {
                     "id": comment.id,
                     "username": comment.username or "Anonymous",
+                    "photo_url": comment.photo_url or "",
                     "text": comment.text,
                     "created_at": comment.created_at.strftime("%d.%m %H:%M"),
                 }

@@ -391,7 +391,7 @@ async def cmd_all_users(message: Message, session: AsyncSession):
 
     for u in users:
         nick = f"@{u.username}" if u.username else f"id{u.telegram_id}"
-        method_labels = {"yoomoney": "СБП", "stars": "⭐", "tribute": "💳"}
+        method_labels = {"stars": "⭐", "tribute": "💳"}
         method = method_labels.get(u.last_payment_method, u.last_payment_method or "—")
         trial_icon = "🎁" if u.trial_used else ""
         line = f"{'✅' if u.units > 0 else '❌'} {nick} | <code>{u.telegram_id}</code> | {u.units}д | {method} {trial_icon}"
@@ -434,7 +434,7 @@ async def cmd_active_users(message: Message, session: AsyncSession):
     lines = []
     for u in users:
         nick = f"@{u.username}" if u.username else f"id{u.telegram_id}"
-        method_labels = {"yoomoney": "СБП", "stars": "⭐", "tribute": "💳"}
+        method_labels = {"stars": "⭐", "tribute": "💳"}
         method = method_labels.get(u.last_payment_method, u.last_payment_method or "—")
         trial_icon = "🎁" if u.trial_used else ""
         raw_badges = _parse_badges(getattr(u, 'badge', None))

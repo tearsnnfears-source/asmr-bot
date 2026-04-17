@@ -1,5 +1,5 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from config import STARS_PRICES, RUB_PRICES, EUR_PRICES, TRIBUTE_BOT_URL
+from config import STARS_PRICES, TRIBUTE_BOT_URL
 from locales.texts import t
 
 
@@ -60,19 +60,24 @@ def kb_plans(lang: str) -> InlineKeyboardMarkup:
 
 def kb_payment(lang: str, days: int) -> InlineKeyboardMarkup:
     stars = STARS_PRICES[days]
+    tribute_url = TRIBUTE_BOT_URL or None
     if lang == "ru":
+        tribute_btn = (
+            InlineKeyboardButton(text=f"🏦 Оплатить по СБП / Карте", url=tribute_url)
+            if tribute_url
+            else InlineKeyboardButton(text=f"🏦 СБП / Карта (Tribute)", callback_data=f"pay:tribute:{days}")
+        )
         rows = [
-            [InlineKeyboardButton(text=f"🏦 Оплатить по СБП — {RUB_PRICES[days]}₽", callback_data=f"pay:yoomoney:{days}")],
+            [tribute_btn],
             [InlineKeyboardButton(text=f"⭐ Телеграм Звёзды — {stars}★", callback_data=f"pay:stars:{days}")],
             [InlineKeyboardButton(text="💎 Криптовалюта — Скоро", callback_data="pay:crypto")],
             [InlineKeyboardButton(text=t("back", lang), callback_data="subscribe")],
         ]
     else:
-        tribute_url = f"{TRIBUTE_BOT_URL}" if TRIBUTE_BOT_URL else None
         card_btn = (
-            InlineKeyboardButton(text=f"💳 Buy with Card — €{EUR_PRICES[days]}", url=tribute_url)
+            InlineKeyboardButton(text=f"💳 Buy with Card (Tribute)", url=tribute_url)
             if tribute_url
-            else InlineKeyboardButton(text=f"💳 Buy with Card — €{EUR_PRICES[days]}", callback_data=f"pay:tribute:{days}")
+            else InlineKeyboardButton(text=f"💳 Buy with Card (Tribute)", callback_data=f"pay:tribute:{days}")
         )
         rows = [
             [card_btn],

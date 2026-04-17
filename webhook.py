@@ -8,9 +8,8 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select
 
-from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges
-from config import TRIBUTE_API_KEY, BOT_TOKEN, INVITE_LINK, STARS_PRICES, RUB_PRICES
-from utils.yoomoney import make_payment_url, generate_label
+from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite
+from config import TRIBUTE_API_KEY, BOT_TOKEN, INVITE_LINK, STARS_PRICES, GROUP_ID
 
 logger = logging.getLogger(__name__)
 
@@ -94,17 +93,32 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         )
 
         bot = Bot(token=BOT_TOKEN)
+        invite_link = INVITE_LINK
+        try:
+            from datetime import timedelta
+            if GROUP_ID:
+                link_obj = await bot.create_chat_invite_link(
+                    GROUP_ID,
+                    member_limit=1,
+                    expire_date=int((__import__('datetime').datetime.utcnow() + timedelta(hours=72)).timestamp()),
+                )
+                invite_link = link_obj.invite_link
+                async with async_session() as inv_session:
+                    await create_pending_invite(inv_session, telegram_id, invite_link)
+        except Exception as e:
+            logger.error(f"Failed to create invite link for {telegram_id}: {e}")
+
         try:
             if lang == "ru":
                 text = (f"✅ <b>Оплата через Tribute прошла успешно!</b>\n\n"
                         f"📅 Добавлено: <b>30 дней</b>\n"
                         f"📅 Итого: <b>{total} дней</b>\n\n"
-                        f"🔗 Ссылка для входа:\n{INVITE_LINK}")
+                        f"🔗 Вернитесь в мини-апп — там вас ждёт ссылка для вступления.")
             else:
                 text = (f"✅ <b>Tribute payment successful!</b>\n\n"
                         f"📅 Added: <b>30 days</b>\n"
                         f"📅 Total: <b>{total} days</b>\n\n"
-                        f"🔗 Join the group:\n{INVITE_LINK}")
+                        f"🔗 Return to the mini-app — your join link is waiting there.")
             await bot.send_message(telegram_id, text, parse_mode="HTML")
         except Exception as e:
             logger.error(f"Cannot notify user {telegram_id}: {e}")
@@ -174,26 +188,27 @@ async def api_create_stars_invoice(request: web.Request) -> web.Response:
         await bot.session.close()
 
 
-async def api_create_yoomoney_payment(request: web.Request) -> web.Response:
-    user_data = await parse_init_data(request)
-    if not user_data:
-        return web.json_response({"error": "Invalid request"}, status=400)
+async def api_check_invite(request: web.Request) -> web.Response:
+    """POST /miniapp/check_invite — returns and consumes pending invite link for the user."""
     try:
         data = await request.json()
-        days = data.get("days", 30)
-    except:
-        days = 30
-    
-    amount = RUB_PRICES.get(days, 499)
-    label = generate_label()
-    pay_url = make_payment_url(amount, label, f"asmrleaks.tv {days} дней")
-    
-    return web.json_response({
-        "payment_url": pay_url,
-        "amount": amount,
-        "days": days,
-        "label": label
-    })
+        init_data = data.get("initData", "")
+        if not init_data:
+            return web.json_response({"invite_link": None})
+        params = dict(urllib.parse.parse_qsl(init_data))
+        user_id = None
+        if 'user' in params:
+            user_info = json.loads(params['user'])
+            user_id = user_info.get('id')
+        if not user_id:
+            return web.json_response({"invite_link": None})
+        async with async_session() as session:
+            link = await consume_pending_invite(session, int(user_id))
+        return web.json_response({"invite_link": link})
+    except Exception as e:
+        logger.error(f"check_invite error: {e}")
+        return web.json_response({"invite_link": None})
+
 
 async def api_get_artists(request: web.Request) -> web.Response:
     async with async_session() as session:
@@ -925,7 +940,7 @@ def create_app() -> web.Application:
     app.middlewares.append(cors_middleware)
     app.router.add_post("/tribute-webhook", tribute_webhook)
     app.router.add_post("/miniapp/create_stars_invoice", api_create_stars_invoice)
-    app.router.add_post("/miniapp/create_yoomoney_payment", api_create_yoomoney_payment)
+    app.router.add_post("/miniapp/check_invite", api_check_invite)
     app.router.add_get("/miniapp/artists", api_get_artists)
     app.router.add_get("/miniapp/videos", api_get_videos)
     app.router.add_get("/miniapp/custom_badges", api_get_custom_badges)

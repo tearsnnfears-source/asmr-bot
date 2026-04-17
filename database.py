@@ -50,6 +50,16 @@ class PendingPayment(Base):
     created_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class PendingInvite(Base):
+    __tablename__ = "pending_invites"
+
+    id:          Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_id: Mapped[int]      = mapped_column(BigInteger, index=True)
+    invite_link: Mapped[str]      = mapped_column(Text)
+    used:        Mapped[bool]     = mapped_column(Boolean, default=False)
+    created_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Favorite(Base):
     __tablename__ = "favorites"
 
@@ -205,6 +215,8 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS badge VARCHAR(256)",
             "DO $$ BEGIN IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='badge' AND character_maximum_length=32) THEN ALTER TABLE users ALTER COLUMN badge TYPE VARCHAR(256); END IF; END $$",
             "CREATE TABLE IF NOT EXISTS custom_badges (id SERIAL PRIMARY KEY, name VARCHAR(32) UNIQUE, color VARCHAR(16), created_at TIMESTAMP DEFAULT NOW())",
+            "CREATE TABLE IF NOT EXISTS pending_invites (id SERIAL PRIMARY KEY, telegram_id BIGINT, invite_link TEXT, used BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())",
+            "CREATE INDEX IF NOT EXISTS idx_pending_invites_user ON pending_invites (telegram_id)",
         ]
         try:
             async with engine.begin() as conn:
@@ -496,6 +508,33 @@ async def delete_custom_badge(session: AsyncSession, name: str) -> bool:
         await session.commit()
         return True
     return False
+
+
+# ─── PendingInvite CRUD ───────────────────────────────────────────────────────
+
+async def create_pending_invite(session: AsyncSession, telegram_id: int, invite_link: str) -> PendingInvite:
+    invite = PendingInvite(telegram_id=telegram_id, invite_link=invite_link)
+    session.add(invite)
+    await session.commit()
+    await session.refresh(invite)
+    return invite
+
+
+async def consume_pending_invite(session: AsyncSession, telegram_id: int) -> str | None:
+    """Return and mark-as-used the newest unused invite link for a user."""
+    from sqlalchemy import select
+    result = await session.execute(
+        select(PendingInvite)
+        .where(PendingInvite.telegram_id == telegram_id, PendingInvite.used == False)
+        .order_by(PendingInvite.created_at.desc())
+        .limit(1)
+    )
+    invite = result.scalar_one_or_none()
+    if not invite:
+        return None
+    invite.used = True
+    await session.commit()
+    return invite.invite_link
 
 
 # ─── Reaction CRUD ────────────────────────────────────────────────────────────

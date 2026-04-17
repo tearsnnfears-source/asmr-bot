@@ -12,12 +12,10 @@ from aiogram import Router, F, Bot
 from aiogram.types import PreCheckoutQuery, Message
 from aiogram.types.message import ContentType
 from sqlalchemy.ext.asyncio import AsyncSession
-from database import get_or_create_user
-from database import get_or_create_user, PendingPayment
+from database import get_or_create_user, PendingPayment, create_pending_invite
 from keyboards.inline import kb_payment, kb_plans, kb_after_payment, kb_back_to_cabinet
 from locales.texts import t
-from utils.yoomoney import make_payment_url, generate_label, check_payment
-from config import STARS_PRICES, RUB_PRICES, INVITE_LINK
+from config import STARS_PRICES, INVITE_LINK, GROUP_ID
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -146,26 +144,40 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
             f"📅 +{days} дней | Итого: {user.units} дн."
         )
 
-        # Уведомление с инвайт-ссылкой
+        # Generate unique invite link and store for miniapp polling
+        invite_link = INVITE_LINK
+        try:
+            from datetime import timedelta, datetime
+            if GROUP_ID:
+                link_obj = await bot.create_chat_invite_link(
+                    GROUP_ID,
+                    member_limit=1,
+                    expire_date=int((datetime.utcnow() + timedelta(hours=72)).timestamp()),
+                )
+                invite_link = link_obj.invite_link
+                await create_pending_invite(session, user_id, invite_link)
+        except Exception as e:
+            logger.error(f"Failed to create invite link for {user_id}: {e}")
+
         if lang == "ru":
             text = (
                 f"🌟 <b>Оплата Звёздами прошла успешно!</b>\n\n"
                 f"📅 Добавлено: <b>{days} дней</b>\n"
                 f"📅 Итого: <b>{user.units} дней</b>\n\n"
-                f"🔗 Вступить в группу:\n{INVITE_LINK}"
+                f"🔗 Вернитесь в мини-апп — там вас ждёт ссылка для вступления."
             )
         else:
             text = (
                 f"🌟 <b>Stars payment successful!</b>\n\n"
                 f"📅 Added: <b>{days} days</b>\n"
                 f"📅 Total: <b>{user.units} days</b>\n\n"
-                f"🔗 Join the group:\n{INVITE_LINK}"
+                f"🔗 Return to the mini-app — your join link is waiting there."
             )
 
         from keyboards.inline import kb_after_payment
         await bot.send_message(
             user_id, text,
-            reply_markup=kb_after_payment(lang, INVITE_LINK),
+            reply_markup=kb_after_payment(lang, invite_link),
             parse_mode="HTML"
         )
 

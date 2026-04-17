@@ -242,7 +242,8 @@ async def api_get_profile(request: web.Request) -> web.Response:
                 "trial_used": user.trial_used, "full_name": user.full_name or "",
                 "username": user.username or "", "telegram_id": user.telegram_id,
                 "is_active": user.is_active, "units": user.units, "lang": user.lang or "",
-                "notify_expiry": getattr(user, 'notify_expiry', True)
+                "notify_expiry": getattr(user, 'notify_expiry', True),
+                "badge": getattr(user, 'badge', None)
             })
     except Exception as e:
         logger.error(f"Error in api_get_profile: {e}")

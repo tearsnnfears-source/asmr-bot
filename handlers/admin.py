@@ -76,13 +76,15 @@ async def cmd_check_user(message: Message, session: AsyncSession):
         await message.reply("❌ Пользователь не найден.")
         return
 
+    badge_line = f"\nБейдж: <b>{user.badge}</b>" if getattr(user, 'badge', None) else ""
     await message.reply(
         f"👤 <b>Пользователь</b>\n"
         f"ID: <code>{user.telegram_id}</code>\n"
         f"Username: @{user.username or '—'}\n"
         f"Язык: {user.lang}\n"
         f"Дней: <b>{user.units}</b>\n"
-        f"Активен: {'✅' if user.is_active else '❌'}",
+        f"Активен: {'✅' if user.is_active else '❌'}"
+        f"{badge_line}",
         parse_mode="HTML"
     )
 
@@ -170,7 +172,12 @@ async def cmd_admin_help(message: Message):
         "/remove_units [user_id] [дней] — забрать дни\n"
         "/set_units [user_id] [дней] — установить дни\n"
         "/check_user [user_id] — проверить пользователя\n"
-        "/allusers — список всех пользователей\n\n"
+        "/allusers — список всех пользователей\n"
+        "/activeusers — только с активной подпиской (units > 0)\n\n"
+        "🏅 <b>Бейджи:</b>\n"
+        "/set_badge [user_id] [BADGE] — выдать бейдж\n"
+        "   Доступные: VIP, TESTER, OLD, FOUNDER, EARLY, DONOR\n"
+        "/remove_badge [user_id] — убрать бейдж\n\n"
         "🚫 <b>Модерация:</b>\n"
         "/kick [user_id] — кикнуть из группы\n"
         "/ban [user_id] — забанить навсегда\n"
@@ -407,6 +414,41 @@ async def cmd_all_users(message: Message, session: AsyncSession):
         text = (header if i == 0 else "") + "\n".join(chunk)
         await message.answer(text, parse_mode="HTML")
 
+@router.message(Command("activeusers"))
+async def cmd_active_users(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+
+    result = await session.execute(
+        select(User).where(User.units > 0).order_by(User.units.desc())
+    )
+    users = result.scalars().all()
+
+    if not users:
+        await message.reply("❌ Нет пользователей с активной подпиской.")
+        return
+
+    lines = []
+    for u in users:
+        nick = f"@{u.username}" if u.username else f"id{u.telegram_id}"
+        method_labels = {"yoomoney": "СБП", "stars": "⭐", "tribute": "💳"}
+        method = method_labels.get(u.last_payment_method, u.last_payment_method or "—")
+        trial_icon = "🎁" if u.trial_used else ""
+        badge_icon = f" [{u.badge}]" if getattr(u, 'badge', None) else ""
+        lines.append(f"✅ {nick} | <code>{u.telegram_id}</code> | {u.units}д | {method}{badge_icon} {trial_icon}")
+
+    header = (
+        f"✅ <b>Активные пользователи: {len(users)}</b>\n"
+        f"{'─' * 30}\n"
+    )
+
+    chunk_size = 30
+    for i in range(0, len(lines), chunk_size):
+        chunk = lines[i:i + chunk_size]
+        text = (header if i == 0 else "") + "\n".join(chunk)
+        await message.answer(text, parse_mode="HTML")
+
+
     # ─── /remove_units <user_id> <дней> ──────────────────────────────────────────
 
 @router.message(Command("remove_units"))
@@ -458,6 +500,63 @@ async def cmd_set_units(message: Message, session: AsyncSession, bot: Bot):
     await session.commit()
 
     await message.reply(f"✅ Пользователю {user_id} установлено {days} дней.")
+
+
+# ─── /set_badge, /remove_badge ───────────────────────────────────────────────
+
+VALID_BADGES = {"VIP", "TESTER", "OLD", "FOUNDER", "EARLY", "DONOR"}
+
+@router.message(Command("set_badge"))
+async def cmd_set_badge(message: Message, session: AsyncSession, bot: Bot):
+    if not is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()[1:]
+    if len(args) != 2 or not args[0].isdigit():
+        await message.reply(
+            "Использование: /set_badge [user_id] [BADGE]\n\n"
+            f"Доступные бейджи: {', '.join(sorted(VALID_BADGES))}"
+        )
+        return
+
+    user_id = int(args[0])
+    badge = args[1].upper()
+    if badge not in VALID_BADGES:
+        await message.reply(f"❌ Неверный бейдж. Доступные: {', '.join(sorted(VALID_BADGES))}")
+        return
+
+    user = await get_user(session, user_id)
+    if not user:
+        await message.reply(f"❌ Пользователь {user_id} не найден.")
+        return
+
+    user.badge = badge
+    await session.commit()
+
+    nick = f"@{user.username}" if user.username else f"id{user.telegram_id}"
+    await message.reply(f"✅ Бейдж <b>{badge}</b> выдан пользователю {nick}", parse_mode="HTML")
+
+
+@router.message(Command("remove_badge"))
+async def cmd_remove_badge(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()[1:]
+    if not args or not args[0].isdigit():
+        await message.reply("Использование: /remove_badge [user_id]")
+        return
+
+    user = await get_user(session, int(args[0]))
+    if not user:
+        await message.reply(f"❌ Пользователь {args[0]} не найден.")
+        return
+
+    user.badge = None
+    await session.commit()
+
+    nick = f"@{user.username}" if user.username else f"id{user.telegram_id}"
+    await message.reply(f"✅ Бейдж убран у пользователя {nick}", parse_mode="HTML")
 
 
 # ─── /add_tag, /list_tags, /del_tag ──────────────────────────────────────────

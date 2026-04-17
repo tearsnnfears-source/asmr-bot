@@ -34,6 +34,7 @@ class User(Base):
     trial_used:          Mapped[bool]     = mapped_column(Boolean, default=False)
     notify_expiry:       Mapped[bool]     = mapped_column(Boolean, default=True)
     last_payment_method: Mapped[str|None] = mapped_column(String(32), nullable=True)
+    badge:               Mapped[str|None] = mapped_column(String(32), nullable=True)
     created_at:          Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -201,6 +202,7 @@ async def init_db():
             "CREATE TABLE IF NOT EXISTS playlist_items (id SERIAL PRIMARY KEY, playlist_id INTEGER, content_id INTEGER, created_at TIMESTAMP DEFAULT NOW())",
             "CREATE INDEX IF NOT EXISTS idx_playlist_items_pl ON playlist_items (playlist_id)",
             "CREATE TABLE IF NOT EXISTS artist_suggestions (id SERIAL PRIMARY KEY, telegram_id BIGINT, username VARCHAR(64), artist_name VARCHAR(256), created_at TIMESTAMP DEFAULT NOW())",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS badge VARCHAR(32)",
         ]
         try:
             async with engine.begin() as conn:

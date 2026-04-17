@@ -76,7 +76,8 @@ async def cmd_check_user(message: Message, session: AsyncSession):
         await message.reply("❌ Пользователь не найден.")
         return
 
-    badge_line = f"\nБейдж: <b>{user.badge}</b>" if getattr(user, 'badge', None) else ""
+    badges_list = _parse_badges(getattr(user, 'badge', None))
+    badge_line = f"\nБейджи: <b>{' + '.join(badges_list)}</b>" if badges_list else ""
     await message.reply(
         f"👤 <b>Пользователь</b>\n"
         f"ID: <code>{user.telegram_id}</code>\n"
@@ -174,10 +175,11 @@ async def cmd_admin_help(message: Message):
         "/check_user [user_id] — проверить пользователя\n"
         "/allusers — список всех пользователей\n"
         "/activeusers — только с активной подпиской (units > 0)\n\n"
-        "🏅 <b>Бейджи:</b>\n"
-        "/set_badge [user_id] [BADGE] — выдать бейдж\n"
-        "   Доступные: VIP, TESTER, OLD, FOUNDER, EARLY, DONOR\n"
-        "/remove_badge [user_id] — убрать бейдж\n\n"
+        "🏅 <b>Бейджи (накапливаются!):</b>\n"
+        "/badges — список всех бейджей\n"
+        "/set_badge [user_id] [BADGE] — добавить бейдж\n"
+        "/remove_badge [user_id] [BADGE] — убрать конкретный\n"
+        "/remove_badge [user_id] all — убрать все\n\n"
         "🚫 <b>Модерация:</b>\n"
         "/kick [user_id] — кикнуть из группы\n"
         "/ban [user_id] — забанить навсегда\n"
@@ -434,7 +436,8 @@ async def cmd_active_users(message: Message, session: AsyncSession):
         method_labels = {"yoomoney": "СБП", "stars": "⭐", "tribute": "💳"}
         method = method_labels.get(u.last_payment_method, u.last_payment_method or "—")
         trial_icon = "🎁" if u.trial_used else ""
-        badge_icon = f" [{u.badge}]" if getattr(u, 'badge', None) else ""
+        raw_badges = _parse_badges(getattr(u, 'badge', None))
+        badge_icon = " [" + ",".join(raw_badges) + "]" if raw_badges else ""
         lines.append(f"✅ {nick} | <code>{u.telegram_id}</code> | {u.units}д | {method}{badge_icon} {trial_icon}")
 
     header = (
@@ -506,6 +509,39 @@ async def cmd_set_units(message: Message, session: AsyncSession, bot: Bot):
 
 VALID_BADGES = {"VIP", "TESTER", "OLD", "FOUNDER", "EARLY", "DONOR"}
 
+BADGE_INFO = {
+    "VIP":     ("💚", "Особый статус / VIP доступ",    "#CCFF00"),
+    "TESTER":  ("🔵", "Бета-тестер проекта",           "#00E5FF"),
+    "OLD":     ("🟡", "Ранний пользователь (old sub)", "#FFD740"),
+    "FOUNDER": ("🟣", "Основатель / поддержал в нуле", "#E040FB"),
+    "EARLY":   ("🟠", "Пришёл одним из первых",        "#FF6D00"),
+    "DONOR":   ("🔴", "Донатер / спонсор проекта",     "#FF4081"),
+}
+
+
+def _parse_badges(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    return [b.strip() for b in raw.split(",") if b.strip() in VALID_BADGES]
+
+
+def _serialize_badges(badges: list[str]) -> str | None:
+    return ",".join(badges) if badges else None
+
+
+@router.message(Command("badges"))
+async def cmd_badges(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    lines = ["🏅 <b>Доступные бейджи:</b>\n"]
+    for name, (icon, desc, color) in BADGE_INFO.items():
+        lines.append(f"{icon} <b>{name}</b> — {desc}\n   Цвет: <code>{color}</code>")
+    lines.append("\n<i>Выдать:</i> /set_badge [user_id] [BADGE]")
+    lines.append("<i>Убрать конкретный:</i> /remove_badge [user_id] [BADGE]")
+    lines.append("<i>Убрать все:</i> /remove_badge [user_id] all")
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
 @router.message(Command("set_badge"))
 async def cmd_set_badge(message: Message, session: AsyncSession, bot: Bot):
     if not is_admin(message.from_user.id):
@@ -515,7 +551,8 @@ async def cmd_set_badge(message: Message, session: AsyncSession, bot: Bot):
     if len(args) != 2 or not args[0].isdigit():
         await message.reply(
             "Использование: /set_badge [user_id] [BADGE]\n\n"
-            f"Доступные бейджи: {', '.join(sorted(VALID_BADGES))}"
+            f"Доступные бейджи: {', '.join(sorted(VALID_BADGES))}\n\n"
+            "Бейджи накапливаются — выдай несколько командой по очереди."
         )
         return
 
@@ -530,11 +567,22 @@ async def cmd_set_badge(message: Message, session: AsyncSession, bot: Bot):
         await message.reply(f"❌ Пользователь {user_id} не найден.")
         return
 
-    user.badge = badge
+    existing = _parse_badges(user.badge)
+    if badge in existing:
+        await message.reply(f"ℹ️ У пользователя уже есть бейдж <b>{badge}</b>.", parse_mode="HTML")
+        return
+
+    existing.append(badge)
+    user.badge = _serialize_badges(existing)
     await session.commit()
 
     nick = f"@{user.username}" if user.username else f"id{user.telegram_id}"
-    await message.reply(f"✅ Бейдж <b>{badge}</b> выдан пользователю {nick}", parse_mode="HTML")
+    all_badges = " + ".join(existing)
+    await message.reply(
+        f"✅ Бейдж <b>{badge}</b> добавлен пользователю {nick}\n"
+        f"Все бейджи: <b>{all_badges}</b>",
+        parse_mode="HTML"
+    )
 
 
 @router.message(Command("remove_badge"))
@@ -544,7 +592,11 @@ async def cmd_remove_badge(message: Message, session: AsyncSession):
 
     args = message.text.split()[1:]
     if not args or not args[0].isdigit():
-        await message.reply("Использование: /remove_badge [user_id]")
+        await message.reply(
+            "Использование:\n"
+            "/remove_badge [user_id] [BADGE] — убрать конкретный бейдж\n"
+            "/remove_badge [user_id] all — убрать все бейджи"
+        )
         return
 
     user = await get_user(session, int(args[0]))
@@ -552,11 +604,27 @@ async def cmd_remove_badge(message: Message, session: AsyncSession):
         await message.reply(f"❌ Пользователь {args[0]} не найден.")
         return
 
-    user.badge = None
-    await session.commit()
-
     nick = f"@{user.username}" if user.username else f"id{user.telegram_id}"
-    await message.reply(f"✅ Бейдж убран у пользователя {nick}", parse_mode="HTML")
+
+    if len(args) >= 2 and args[1].upper() != "ALL":
+        badge_to_remove = args[1].upper()
+        existing = _parse_badges(user.badge)
+        if badge_to_remove not in existing:
+            await message.reply(f"ℹ️ У пользователя нет бейджа <b>{badge_to_remove}</b>.", parse_mode="HTML")
+            return
+        existing.remove(badge_to_remove)
+        user.badge = _serialize_badges(existing)
+        await session.commit()
+        remaining = " + ".join(existing) if existing else "нет"
+        await message.reply(
+            f"✅ Бейдж <b>{badge_to_remove}</b> убран у {nick}\n"
+            f"Остались: <b>{remaining}</b>",
+            parse_mode="HTML"
+        )
+    else:
+        user.badge = None
+        await session.commit()
+        await message.reply(f"✅ Все бейджи убраны у пользователя {nick}", parse_mode="HTML")
 
 
 # ─── /add_tag, /list_tags, /del_tag ──────────────────────────────────────────

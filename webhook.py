@@ -243,7 +243,8 @@ async def api_get_profile(request: web.Request) -> web.Response:
                 "username": user.username or "", "telegram_id": user.telegram_id,
                 "is_active": user.is_active, "units": user.units, "lang": user.lang or "",
                 "notify_expiry": getattr(user, 'notify_expiry', True),
-                "badge": getattr(user, 'badge', None)
+                "badge": getattr(user, 'badge', None),
+                "badges": [b.strip() for b in (getattr(user, 'badge', None) or "").split(",") if b.strip()]
             })
     except Exception as e:
         logger.error(f"Error in api_get_profile: {e}")
@@ -511,6 +512,17 @@ async def api_get_comments(request: web.Request) -> web.Response:
     content_id = int(request.match_info.get("id", 0))
     async with async_session() as session:
         comments = await get_comments(session, content_id)
+
+        # Batch-load badges for all commenters
+        tg_ids = list({c.telegram_id for c in comments})
+        badge_map: dict[int, list[str]] = {}
+        if tg_ids:
+            result = await session.execute(
+                select(User.telegram_id, User.badge).where(User.telegram_id.in_(tg_ids))
+            )
+            for tid, raw in result.all():
+                badge_map[tid] = [b.strip() for b in (raw or "").split(",") if b.strip()]
+
         return web.json_response({
             "comments": [
                 {
@@ -519,6 +531,7 @@ async def api_get_comments(request: web.Request) -> web.Response:
                     "photo_url": c.photo_url or "",
                     "text": c.text,
                     "created_at": c.created_at.strftime("%d.%m %H:%M"),
+                    "badges": badge_map.get(c.telegram_id, [])[:3],
                 }
                 for c in reversed(comments)
             ]

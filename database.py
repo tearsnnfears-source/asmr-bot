@@ -204,6 +204,7 @@ async def init_db():
             "CREATE TABLE IF NOT EXISTS artist_suggestions (id SERIAL PRIMARY KEY, telegram_id BIGINT, username VARCHAR(64), artist_name VARCHAR(256), created_at TIMESTAMP DEFAULT NOW())",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS badge VARCHAR(256)",
             "DO $$ BEGIN IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='badge' AND character_maximum_length=32) THEN ALTER TABLE users ALTER COLUMN badge TYPE VARCHAR(256); END IF; END $$",
+            "CREATE TABLE IF NOT EXISTS custom_badges (id SERIAL PRIMARY KEY, name VARCHAR(32) UNIQUE, color VARCHAR(16), created_at TIMESTAMP DEFAULT NOW())",
         ]
         try:
             async with engine.begin() as conn:
@@ -456,6 +457,42 @@ async def delete_tag(session: AsyncSession, name: str) -> bool:
     tag = await get_tag(session, name)
     if tag:
         await session.delete(tag)
+        await session.commit()
+        return True
+    return False
+
+
+# ─── CustomBadge CRUD ────────────────────────────────────────────────────────
+
+class CustomBadge(Base):
+    __tablename__ = "custom_badges"
+
+    id:         Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name:       Mapped[str]      = mapped_column(String(32), unique=True, index=True)
+    color:      Mapped[str]      = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+async def create_custom_badge(session: AsyncSession, name: str, color: str) -> CustomBadge:
+    badge = CustomBadge(name=name, color=color)
+    session.add(badge)
+    await session.commit()
+    await session.refresh(badge)
+    return badge
+
+
+async def get_custom_badges(session: AsyncSession) -> list[CustomBadge]:
+    from sqlalchemy import select
+    result = await session.execute(select(CustomBadge).order_by(CustomBadge.name))
+    return list(result.scalars().all())
+
+
+async def delete_custom_badge(session: AsyncSession, name: str) -> bool:
+    from sqlalchemy import select
+    result = await session.execute(select(CustomBadge).where(CustomBadge.name == name))
+    badge = result.scalar_one_or_none()
+    if badge:
+        await session.delete(badge)
         await session.commit()
         return True
     return False

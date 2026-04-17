@@ -8,7 +8,7 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select
 
-from database import async_session, User, PendingPayment, Artist, get_all_artists, Video, get_all_videos, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion
+from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges
 from config import TRIBUTE_API_KEY, BOT_TOKEN, INVITE_LINK, STARS_PRICES, RUB_PRICES
 from utils.yoomoney import make_payment_url, generate_label
 
@@ -412,11 +412,31 @@ async def api_free_trial(request: web.Request) -> web.Response:
 
 async def api_get_videos(request: web.Request) -> web.Response:
     try:
-        limit = int(request.query.get('limit', 20))
+        limit = int(request.query.get('limit', 500))
         async with async_session() as session:
-            videos = await get_all_videos(session, limit)
-            videos_data = [{"id": v.id, "title": v.title, "url": v.url, "embed_url": v.embed_url, "thumbnail_url": v.thumbnail_url, "artist_name": v.artist_name, "duration": v.duration} for v in videos]
+            result = await session.execute(
+                select(ArtistContent)
+                .where(ArtistContent.content_type == "video")
+                .order_by(ArtistContent.created_at.desc())
+                .limit(limit)
+            )
+            videos = result.scalars().all()
+            videos_data = [{
+                "id": v.id, "title": v.title or "", "url": v.url,
+                "embed_url": v.url, "thumbnail_url": v.thumbnail_url or "",
+                "artist_name": v.artist_name, "tags": v.tags or "",
+                "created_at": v.created_at.isoformat() if v.created_at else ""
+            } for v in videos]
             return web.json_response({"videos": videos_data, "total": len(videos_data)})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def api_get_custom_badges(request: web.Request) -> web.Response:
+    try:
+        async with async_session() as session:
+            badges = await get_custom_badges(session)
+            return web.json_response({"badges": [{"name": b.name, "color": b.color} for b in badges]})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
@@ -908,6 +928,7 @@ def create_app() -> web.Application:
     app.router.add_post("/miniapp/create_yoomoney_payment", api_create_yoomoney_payment)
     app.router.add_get("/miniapp/artists", api_get_artists)
     app.router.add_get("/miniapp/videos", api_get_videos)
+    app.router.add_get("/miniapp/custom_badges", api_get_custom_badges)
     app.router.add_post("/miniapp/profile", api_get_profile)
     app.router.add_post("/miniapp/set_language", api_set_language)
     app.router.add_post("/miniapp/set_notify_expiry", api_set_notify_expiry)

@@ -6,7 +6,7 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, Video, create_video, get_all_videos, delete_video, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts, Tag, get_all_tags, get_tag, create_tag, delete_tag
+from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts, Tag, get_all_tags, get_tag, create_tag, delete_tag, CustomBadge, create_custom_badge, get_custom_badges, delete_custom_badge
 from handlers.group import enable_night_mode, disable_night_mode
 from config import ADMIN_IDS, GROUP_ID, INVITE_LINK
 
@@ -187,10 +187,11 @@ async def cmd_admin_help(message: Message):
         "/nightmode_off — выключить ночной режим\n\n"
         "🎨 <b>Артисты:</b>\n"
         "/set_cont — управление артистами\n\n"
-        "🎬 <b>Видео (Last Updates):</b>\n"
-        "/add_video [название] [артист] [embed_url] [duration] — добавить видео\n"
-        "/del_video [id] — удалить видео по ID\n"
-        "/allvideos — показать все видео\n\n"
+        "🏅 <b>Бейджи:</b>\n"
+        "/badges — список бейджей\n"
+        "/create_badge \"NAME\" | #HEX — создать кастомный бейдж\n"
+        "/set_badge [user_id] [BADGE] — выдать бейдж\n"
+        "/remove_badge [user_id] [BADGE|all] — убрать бейдж\n\n"
         "🎨 <b>Профиль артиста (контент в миниапп):</b>\n"
         "/add_cont [имя] — добавить видео/фото артисту\n"
         "   Пример: /add_cont Moona ASMR\n"
@@ -522,7 +523,7 @@ BADGE_INFO = {
 def _parse_badges(raw: str | None) -> list[str]:
     if not raw:
         return []
-    return [b.strip() for b in raw.split(",") if b.strip() in VALID_BADGES]
+    return [b.strip() for b in raw.split(",") if b.strip()]
 
 
 def _serialize_badges(badges: list[str]) -> str | None:
@@ -530,16 +531,57 @@ def _serialize_badges(badges: list[str]) -> str | None:
 
 
 @router.message(Command("badges"))
-async def cmd_badges(message: Message):
+async def cmd_badges(message: Message, session: AsyncSession):
     if not is_admin(message.from_user.id):
         return
-    lines = ["🏅 <b>Доступные бейджи:</b>\n"]
+    lines = ["🏅 <b>Встроенные бейджи:</b>\n"]
     for name, (icon, desc, color) in BADGE_INFO.items():
         lines.append(f"{icon} <b>{name}</b> — {desc}\n   Цвет: <code>{color}</code>")
-    lines.append("\n<i>Выдать:</i> /set_badge [user_id] [BADGE]")
+    custom = await get_custom_badges(session)
+    if custom:
+        lines.append("\n🎨 <b>Кастомные бейджи:</b>\n")
+        for b in custom:
+            lines.append(f"● <b>{b.name}</b> — <code>{b.color}</code>")
+    lines.append("\n<i>Создать:</i> /create_badge \"NAME\" | #HEX")
+    lines.append("<i>Выдать:</i> /set_badge [user_id] [BADGE]")
     lines.append("<i>Убрать конкретный:</i> /remove_badge [user_id] [BADGE]")
     lines.append("<i>Убрать все:</i> /remove_badge [user_id] all")
     await message.reply("\n".join(lines), parse_mode="HTML")
+
+
+@router.message(Command("create_badge"))
+async def cmd_create_badge(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+    text = message.text[len("/create_badge"):].strip()
+    if "|" not in text:
+        await message.reply(
+            "Использование: /create_badge \"NAME\" | #HEX\n\n"
+            "Пример: /create_badge \"WHALE\" | #FF00AA"
+        )
+        return
+    parts = text.split("|", 1)
+    name = parts[0].strip().strip('"').strip("'").upper()
+    color = parts[1].strip()
+    if not name or len(name) > 32:
+        await message.reply("❌ Имя бейджа должно быть от 1 до 32 символов.")
+        return
+    if not color.startswith("#") or len(color) not in (4, 7):
+        await message.reply("❌ Цвет должен быть в формате #RGB или #RRGGBB")
+        return
+    if name in VALID_BADGES:
+        await message.reply(f"❌ Бейдж <b>{name}</b> уже существует как встроенный.", parse_mode="HTML")
+        return
+    existing = await get_custom_badges(session)
+    if any(b.name == name for b in existing):
+        await message.reply(f"❌ Кастомный бейдж <b>{name}</b> уже существует.", parse_mode="HTML")
+        return
+    badge = await create_custom_badge(session, name, color)
+    await message.reply(
+        f"✅ Бейдж создан!\n\n<b>{badge.name}</b> — <code>{badge.color}</code>\n\n"
+        "Выдать: /set_badge [user_id] " + badge.name,
+        parse_mode="HTML"
+    )
 
 
 @router.message(Command("set_badge"))
@@ -558,8 +600,10 @@ async def cmd_set_badge(message: Message, session: AsyncSession, bot: Bot):
 
     user_id = int(args[0])
     badge = args[1].upper()
-    if badge not in VALID_BADGES:
-        await message.reply(f"❌ Неверный бейдж. Доступные: {', '.join(sorted(VALID_BADGES))}")
+    custom_names = {b.name for b in await get_custom_badges(session)}
+    all_valid = VALID_BADGES | custom_names
+    if badge not in all_valid:
+        await message.reply(f"❌ Неверный бейдж. Доступные: {', '.join(sorted(all_valid))}")
         return
 
     user = await get_user(session, user_id)
@@ -1037,174 +1081,6 @@ async def cmd_artist_prom_off(message: Message, session: AsyncSession):
         await message.reply(f"❌ Артист '{name}' не найден.")
 
 
-# ─── Управление видео ────────────────────────────────────────────────────────
-
-@router.message(Command("set_videos"))
-async def cmd_set_videos(message: Message):
-    """Показать команды для управления видео"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    await message.reply(
-        "🎬 Управление видео\n\n"
-        "Команды:\n"
-        "/add_video [название] [артист] [embed_url] [duration] — добавить видео\n"
-        "/del_video [id] — удалить видео\n"
-        "/allvideos — показать все видео\n\n"
-        "Пример:\n"
-        "/add_video \"New ASMR Stream\" \"Bunny\" \"https://player.mediadelivery.net/...\" \"41:07\""
-    )
-
-
-# ─── /add_video [название] [артист] [embed_url] [duration] ────────────────────
-
-@router.message(Command("add_video"))
-async def cmd_add_video(message: Message, session: AsyncSession):
-    """Добавить новое видео"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    # Получаем текст после команды и убираем кавычки
-    text = message.text[message.text.find(" "):].strip()
-    if not text:
-        await message.reply(
-            "📝 <b>Добавление видео в Last Updates</b>\n\n"
-            "Использование:\n"
-            "<code>/add_video \"Название\" \"Артист\" \"embed_url\" \"длительность\"</code>\n\n"
-            "Пример:\n"
-            "<code>/add_video \"New ASMR Stream\" \"Bunny\" \"https://player.mediadelivery.net/embed/621300/9019a393-c9dd-4f8b-9eea-192cab12c819\" \"41:07\"</code>"
-        )
-        return
-    
-    # Убираем кавычки из аргументов
-    parts = text.split('"')
-    # Фильтруем пустые строки
-    clean_parts = [p.strip() for p in parts if p.strip()]
-    
-    if len(clean_parts) < 3:
-        await message.reply(
-            "❌ Недостаточно аргументов.\n\n"
-            "Формат: /add_video \"Название\" \"Артист\" \"embed_url\" \"длительность\"\n\n"
-            "Пример:\n"
-            "/add_video \"ASMR Stream\" \"Bunny\" \"https://player.mediadelivery.net/embed/...\" \"12:34\""
-        )
-        return
-    
-    # Ищем URL (обычно содержит player.mediadelivery.net или similar)
-    title = None
-    artist_name = None
-    embed_url = None
-    duration = None
-    
-    # Проходим по частям и ищем URL
-    for i, part in enumerate(clean_parts):
-        if "http" in part.lower() or "player" in part.lower():
-            embed_url = part.strip()
-            # До этого момента - title и artist
-            if i > 0:
-                # Если есть только одна часть до URL - это title
-                # Если две части - title и artist
-                if i == 1:
-                    title = clean_parts[0]
-                    artist_name = "Unknown"
-                elif i >= 2:
-                    title = " ".join(clean_parts[:i-1])
-                    artist_name = clean_parts[i-1]
-            # После URL может быть duration
-            if i + 1 < len(clean_parts):
-                duration = clean_parts[i + 1]
-            break
-    
-    if not embed_url:
-        await message.reply(
-            "❌ Не найден URL видео.\n\n"
-            "URL должен содержать http и ссылку на плеер (player.mediadelivery.net)"
-        )
-        return
-    
-    # Если title не определен, используем значение по умолчанию
-    if not title:
-        title = "Untitled Video"
-    if not artist_name:
-        artist_name = "Unknown"
-    
-    # Очищаем duration от лишних символов
-    if duration:
-        duration = duration.strip().replace('"', '').replace("'", "")
-    
-    try:
-        video = await create_video(
-            session,
-            title=title,
-            url=embed_url,
-            embed_url=embed_url,
-            artist_name=artist_name,
-            duration=duration
-        )
-        
-        # Формируем красивое сообщение
-        duration_str = f" ⏱ {duration}" if duration else ""
-        await message.reply(
-            f"✅ <b>Видео добавлено в Last Updates!</b>\n\n"
-            f"📌 <b>ID:</b> <code>{video.id}</code>\n"
-            f"🎬 <b>Название:</b> {title}\n"
-            f"👤 <b>Артист:</b> {artist_name}{duration_str}\n"
-            f"🔗 <b>URL:</b> {embed_url[:50]}..."
-        )
-    except Exception as e:
-        logger.error(f"Error adding video: {e}")
-        await message.reply(f"❌ Ошибка при добавлении видео: {e}")
-
-
-# ─── /del_video [id] ─────────────────────────────────────────────────────────
-
-@router.message(Command("del_video"))
-async def cmd_del_video(message: Message, session: AsyncSession):
-    """Удалить видео по ID"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    args = message.text.split()[1:]
-    if not args or not args[0].isdigit():
-        await message.reply("Использование: /del_video [id]")
-        return
-    
-    video_id = int(args[0])
-    
-    deleted = await delete_video(session, video_id)
-    if deleted:
-        await message.reply(f"✅ Видео с ID {video_id} удалено.")
-    else:
-        await message.reply(f"❌ Видео с ID {video_id} не найдено.")
-
-
-# ─── /allvideos ───────────────────────────────────────────────────────────────
-
-@router.message(Command("allvideos"))
-async def cmd_all_videos(message: Message, session: AsyncSession):
-    """Показать все видео"""
-    if not is_admin(message.from_user.id):
-        return
-    
-    videos = await get_all_videos(session, 50)
-    
-    if not videos:
-        await message.reply("В базе нет видео.")
-        return
-    
-    header = f"🎬 <b>Все видео: {len(videos)}</b>\n{'─' * 30}\n"
-    
-    lines = []
-    for v in videos:
-        duration = v.duration or "—"
-        lines.append(f"ID:{v.id} | {v.title[:30]} | {v.artist_name} | {duration}")
-    
-    # Split into parts
-    chunk_size = 20
-    for i in range(0, len(lines), chunk_size):
-        chunk = lines[i:i + chunk_size]
-        text = header + "\n".join(chunk) if i == 0 else "\n".join(chunk)
-        await message.answer(text, parse_mode="HTML")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ARTIST PROFILE CONTENT — /set_cont, /list_cont, /clear_cont

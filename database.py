@@ -463,7 +463,7 @@ async def delete_tag(session: AsyncSession, name: str) -> bool:
 
 # ─── Reaction CRUD ────────────────────────────────────────────────────────────
 
-ALLOWED_REACTIONS = ["🔥", "❤️", "👎", "💦", "👅"]
+ALLOWED_REACTIONS = ["🔥","❤️","👅","💦","😍","🥵","🫦","😮","🤤","💤","😴","✨","🎧","💋","🤫"]
 MAX_REACTIONS_PER_USER = 3
 
 

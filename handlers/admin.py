@@ -6,7 +6,7 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts, Tag, get_all_tags, get_tag, create_tag, delete_tag, CustomBadge, create_custom_badge, get_custom_badges, delete_custom_badge
+from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts, Tag, get_all_tags, get_tag, create_tag, delete_tag, CustomBadge, create_custom_badge, get_custom_badges, delete_custom_badge, assign_tier_badge
 from handlers.group import enable_night_mode, disable_night_mode
 from config import ADMIN_IDS, GROUP_ID, INVITE_LINK
 
@@ -189,6 +189,7 @@ async def cmd_admin_help(message: Message):
         "💎 <b>Тиры подписки:</b>\n"
         "/set_tier [user_id] [plus|pro|elite|free] — установить тир\n"
         "/users_tiers — активные юзеры с тирами и днями\n"
+        "/sync_tier_badges — выдать бейджи PLUS/PRO/ELITE всем по тиру\n"
         "   plus — стандарт (€6), pro — расширенный (€8), elite — скоро\n\n"
         "🎨 <b>Артисты и контент:</b>\n"
         "/set_cont — управление артистами\n"
@@ -688,9 +689,26 @@ async def cmd_set_tier(message: Message, session: AsyncSession):
         await message.reply(f"❌ Пользователь {args[0]} не найден.")
         return
     user.tier = tier
+    assign_tier_badge(user)
     await session.commit()
     nick = f"@{user.username}" if user.username else f"id{user.telegram_id}"
     await message.reply(f"✅ Тир пользователя {nick} установлен: <b>{tier.upper()}</b>", parse_mode="HTML")
+
+
+# ─── /sync_tier_badges ───────────────────────────────────────────────────────
+
+@router.message(Command("sync_tier_badges"))
+async def cmd_sync_tier_badges(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+    result = await session.execute(select(User))
+    users = result.scalars().all()
+    count = 0
+    for u in users:
+        assign_tier_badge(u)
+        count += 1
+    await session.commit()
+    await message.reply(f"✅ Тир-бейджи синхронизированы у <b>{count}</b> пользователей.", parse_mode="HTML")
 
 
 # ─── /users_tiers ────────────────────────────────────────────────────────────

@@ -217,6 +217,9 @@ async def init_db():
             "DO $$ BEGIN IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='badge' AND character_maximum_length=32) THEN ALTER TABLE users ALTER COLUMN badge TYPE VARCHAR(256); END IF; END $$",
             "CREATE TABLE IF NOT EXISTS custom_badges (id SERIAL PRIMARY KEY, name VARCHAR(32) UNIQUE, color VARCHAR(16), created_at TIMESTAMP DEFAULT NOW())",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS tier VARCHAR(16) DEFAULT 'plus'",
+            "INSERT INTO custom_badges (name, color) VALUES ('PLUS', '#FF7EC8') ON CONFLICT (name) DO NOTHING",
+            "INSERT INTO custom_badges (name, color) VALUES ('PRO', '#00E5FF') ON CONFLICT (name) DO NOTHING",
+            "INSERT INTO custom_badges (name, color) VALUES ('ELITE', '#FFD700') ON CONFLICT (name) DO NOTHING",
             "CREATE TABLE IF NOT EXISTS pending_invites (id SERIAL PRIMARY KEY, telegram_id BIGINT, invite_link TEXT, used BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())",
             "CREATE INDEX IF NOT EXISTS idx_pending_invites_user ON pending_invites (telegram_id)",
         ]
@@ -510,6 +513,21 @@ async def delete_custom_badge(session: AsyncSession, name: str) -> bool:
         await session.commit()
         return True
     return False
+
+
+# ─── Tier badge auto-assign ───────────────────────────────────────────────────
+
+TIER_BADGE_NAMES = {'PLUS', 'PRO', 'ELITE'}
+
+def assign_tier_badge(user: "User") -> None:
+    """Remove old tier badges and set the correct one for user.tier. Mutates user.badge."""
+    tier_to_badge = {'plus': 'PLUS', 'pro': 'PRO', 'elite': 'ELITE'}
+    new_badge = tier_to_badge.get((user.tier or 'plus').lower())
+    current = [b.strip() for b in (user.badge or '').split(',') if b.strip()]
+    current = [b for b in current if b not in TIER_BADGE_NAMES]
+    if new_badge:
+        current.append(new_badge)
+    user.badge = ','.join(current) if current else None
 
 
 # ─── PendingInvite CRUD ───────────────────────────────────────────────────────

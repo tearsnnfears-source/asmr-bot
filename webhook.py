@@ -9,7 +9,7 @@ from aiogram.types import LabeledPrice
 from sqlalchemy import select
 
 from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, assign_tier_badge
-from config import TRIBUTE_API_KEY, BOT_TOKEN, INVITE_LINK, STARS_PRICES, GROUP_ID, TRIBUTE_TIER_MAP, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL
+from config import TRIBUTE_API_KEY, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, TRIBUTE_TIER_MAP, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL
 
 logger = logging.getLogger(__name__)
 
@@ -166,10 +166,12 @@ async def api_create_stars_invoice(request: web.Request) -> web.Response:
     try:
         data = await request.json()
         days = data.get("days", 30)
+        tier = data.get("tier", "plus")
     except:
         days = 30
-    
-    stars = STARS_PRICES.get(days, 400)
+        tier = "plus"
+
+    stars = STARS_TIER_PRICES.get(tier, STARS_PRICES.get(days, 500))
     
     # Достаем ID юзера из initData, чтобы положить его в payload
     params = dict(urllib.parse.parse_qsl(user_data["init_data"]))

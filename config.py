@@ -32,6 +32,14 @@ STARS_PRICES = {
     30: 500,
 }
 
+# Stars price per tier
+STARS_TIER_PRICES = {
+    'plus':  500,
+    'pro':   650,
+    'elite': 800,
+    'free':  500,
+}
+
 # Ночной режим (МСК)
 NIGHT_START = 23
 NIGHT_END   = 8

@@ -188,6 +188,7 @@ async def cmd_admin_help(message: Message):
         "/nightmode_off — выключить ночной режим\n\n"
         "💎 <b>Тиры подписки:</b>\n"
         "/set_tier [user_id] [plus|pro|elite|free] — установить тир\n"
+        "/users_tiers — активные юзеры с тирами и днями\n"
         "   plus — стандарт (€6), pro — расширенный (€8), elite — скоро\n\n"
         "🎨 <b>Артисты и контент:</b>\n"
         "/set_cont — управление артистами\n"
@@ -469,6 +470,7 @@ async def cmd_remove_units(message: Message, session: AsyncSession, bot: Bot):
     user.units = max(0, user.units - days)
     if user.units == 0:
         user.is_active = False
+        user.tier = 'plus'  # reset tier on expiry
     await session.commit()
 
     await message.reply(f"✅ У пользователя {user_id} забрано {days} дней. Итого: {user.units}")
@@ -689,6 +691,37 @@ async def cmd_set_tier(message: Message, session: AsyncSession):
     await session.commit()
     nick = f"@{user.username}" if user.username else f"id{user.telegram_id}"
     await message.reply(f"✅ Тир пользователя {nick} установлен: <b>{tier.upper()}</b>", parse_mode="HTML")
+
+
+# ─── /users_tiers ────────────────────────────────────────────────────────────
+
+@router.message(Command("users_tiers"))
+async def cmd_users_tiers(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+    result = await session.execute(
+        select(User).where(User.units > 0).order_by(User.tier, User.units.desc())
+    )
+    users = result.scalars().all()
+    if not users:
+        await message.reply("Нет активных пользователей.")
+        return
+
+    tier_icon = {'pro': '💎', 'elite': '👑', 'plus': '⭐', 'free': '🆓'}
+    lines = ["💎 <b>Активные подписчики по тирам:</b>\n"]
+    current_tier = None
+    for u in users:
+        t = (u.tier or 'plus').lower()
+        if t != current_tier:
+            current_tier = t
+            lines.append(f"\n{tier_icon.get(t,'•')} <b>{t.upper()}</b>")
+        nick = f"@{u.username}" if u.username else f"id{u.telegram_id}"
+        lines.append(f"  {nick} — {u.units} дн.")
+
+    # Split into chunks of ≤4096 chars
+    text = "\n".join(lines)
+    for i in range(0, len(text), 4000):
+        await message.reply(text[i:i+4000], parse_mode="HTML")
 
 
 # ─── /add_tag, /list_tags, /del_tag ──────────────────────────────────────────

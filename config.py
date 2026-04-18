@@ -15,6 +15,18 @@ TRIBUTE_BOT_URL     = os.getenv("TRIBUTE_BOT_URL", "")
 TRIBUTE_API_KEY     = os.getenv("TRIBUTE_API_KEY", "")
 TRIBUTE_DONATE_LINK = os.getenv("TRIBUTE_DONATE_LINK", "")
 
+# Tribute per-tier links  (startapp code → tier)
+TRIBUTE_PLUS_URL    = os.getenv("TRIBUTE_PLUS_URL",  "https://t.me/tribute/app?startapp=sQSn")
+TRIBUTE_PRO_URL     = os.getenv("TRIBUTE_PRO_URL",   "https://t.me/tribute/app?startapp=sT5D")
+TRIBUTE_ELITE_URL   = os.getenv("TRIBUTE_ELITE_URL", "https://t.me/tribute/app?startapp=sT5E")
+
+# startapp code → tier (used in webhook to auto-assign tier)
+TRIBUTE_TIER_MAP = {
+    "sQSn": "plus",
+    "sT5D": "pro",
+    "sT5E": "elite",
+}
+
 # Telegram Stars — prices in stars
 STARS_PRICES = {
     30: 500,

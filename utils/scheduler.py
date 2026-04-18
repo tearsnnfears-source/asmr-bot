@@ -33,6 +33,7 @@ async def daily_unit_check(bot: Bot):
             user.units = max(0, user.units - 1)
 
             if user.units == 0:
+                user.tier = 'plus'  # reset tier on expiry
                 # Кик
                 try:
                     await bot.ban_chat_member(GROUP_ID, user.telegram_id)

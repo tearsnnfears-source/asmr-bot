@@ -9,7 +9,7 @@ from aiogram.types import LabeledPrice
 from sqlalchemy import select
 
 from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite
-from config import TRIBUTE_API_KEY, BOT_TOKEN, INVITE_LINK, STARS_PRICES, GROUP_ID
+from config import TRIBUTE_API_KEY, BOT_TOKEN, INVITE_LINK, STARS_PRICES, GROUP_ID, TRIBUTE_TIER_MAP, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL
 
 logger = logging.getLogger(__name__)
 
@@ -65,12 +65,20 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             result = await session.execute(select(User).where(User.telegram_id == telegram_id))
             user = result.scalar_one_or_none()
 
-            # Determine tier from payment amount (€8+ = PRO, else PLUS)
-            try:
-                amount_eur = float(payload.get("amount", 0) or payload.get("price", 0) or 0)
-            except Exception:
-                amount_eur = 0
-            new_tier = 'pro' if amount_eur >= 8 else 'plus'
+            # Determine tier from startapp code (explicit), fallback to amount
+            raw = json.dumps(payload)
+            new_tier = 'plus'
+            for code, tier in TRIBUTE_TIER_MAP.items():
+                if code in raw:
+                    new_tier = tier
+                    break
+            else:
+                try:
+                    amount_eur = float(payload.get("amount", 0) or payload.get("price", 0) or 0)
+                except Exception:
+                    amount_eur = 0
+                if amount_eur >= 8:
+                    new_tier = 'pro'
 
             if not user:
                 user = User(
@@ -271,6 +279,8 @@ async def api_get_profile(request: web.Request) -> web.Response:
                 "badge": getattr(user, 'badge', None),
                 "badges": [b.strip() for b in (getattr(user, 'badge', None) or "").split(",") if b.strip()],
                 "tier": getattr(user, 'tier', 'plus') or 'plus',
+                "tribute_plus_url": TRIBUTE_PLUS_URL,
+                "tribute_pro_url": TRIBUTE_PRO_URL,
             })
     except Exception as e:
         logger.error(f"Error in api_get_profile: {e}")

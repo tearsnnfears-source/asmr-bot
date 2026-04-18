@@ -247,7 +247,8 @@ async def api_get_artists(request: web.Request) -> web.Response:
             "topic_url": getattr(a, 'topic_url', None),
             "has_profile": a.name in artists_with_content,
             "photos": a.photos, "videos": a.videos, "tag_hot": getattr(a, 'tag_hot', False),
-            "tag_new": getattr(a, 'tag_new', False), "tag_prom": getattr(a, 'tag_prom', False)
+            "tag_new": getattr(a, 'tag_new', False), "tag_prom": getattr(a, 'tag_prom', False),
+            "tag_ready": getattr(a, 'tag_ready', False)
         } for a in artists]
         return web.json_response({"artists": artists_data, "total": len(artists_data)})
 

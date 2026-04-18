@@ -158,6 +158,7 @@ class Artist(Base):
     tag_hot:           Mapped[bool]     = mapped_column(Boolean, default=False)
     tag_new:           Mapped[bool]     = mapped_column(Boolean, default=False)
     tag_prom:          Mapped[bool]     = mapped_column(Boolean, default=False)
+    tag_ready:         Mapped[bool]     = mapped_column(Boolean, default=False)
     created_at:        Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -195,6 +196,7 @@ async def init_db():
             "ALTER TABLE artists ADD COLUMN IF NOT EXISTS tag_hot BOOLEAN DEFAULT FALSE",
             "ALTER TABLE artists ADD COLUMN IF NOT EXISTS tag_new BOOLEAN DEFAULT FALSE",
             "ALTER TABLE artists ADD COLUMN IF NOT EXISTS tag_prom BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE artists ADD COLUMN IF NOT EXISTS tag_ready BOOLEAN DEFAULT FALSE",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS notify_expiry BOOLEAN DEFAULT TRUE",
             "ALTER TABLE videos ADD COLUMN IF NOT EXISTS thumbnail_url VARCHAR(512)",
             "ALTER TABLE artists ADD COLUMN IF NOT EXISTS topic_url VARCHAR(512)",
@@ -349,6 +351,8 @@ async def set_artist_tag(session: AsyncSession, name: str, tag: str, value: bool
         artist.tag_new = value
     elif tag == 'prom':
         artist.tag_prom = value
+    elif tag == 'ready':
+        artist.tag_ready = value
     await session.commit()
     await session.refresh(artist)
     return artist

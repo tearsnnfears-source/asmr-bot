@@ -35,6 +35,7 @@ class User(Base):
     notify_expiry:       Mapped[bool]     = mapped_column(Boolean, default=True)
     last_payment_method: Mapped[str|None] = mapped_column(String(32), nullable=True)
     badge:               Mapped[str|None] = mapped_column(String(256), nullable=True)
+    tier:                Mapped[str]      = mapped_column(String(16), default='plus')
     created_at:          Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -215,6 +216,7 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS badge VARCHAR(256)",
             "DO $$ BEGIN IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='badge' AND character_maximum_length=32) THEN ALTER TABLE users ALTER COLUMN badge TYPE VARCHAR(256); END IF; END $$",
             "CREATE TABLE IF NOT EXISTS custom_badges (id SERIAL PRIMARY KEY, name VARCHAR(32) UNIQUE, color VARCHAR(16), created_at TIMESTAMP DEFAULT NOW())",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS tier VARCHAR(16) DEFAULT 'plus'",
             "CREATE TABLE IF NOT EXISTS pending_invites (id SERIAL PRIMARY KEY, telegram_id BIGINT, invite_link TEXT, used BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())",
             "CREATE INDEX IF NOT EXISTS idx_pending_invites_user ON pending_invites (telegram_id)",
         ]

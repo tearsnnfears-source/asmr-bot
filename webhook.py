@@ -65,6 +65,13 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             result = await session.execute(select(User).where(User.telegram_id == telegram_id))
             user = result.scalar_one_or_none()
 
+            # Determine tier from payment amount (€8+ = PRO, else PLUS)
+            try:
+                amount_eur = float(payload.get("amount", 0) or payload.get("price", 0) or 0)
+            except Exception:
+                amount_eur = 0
+            new_tier = 'pro' if amount_eur >= 8 else 'plus'
+
             if not user:
                 user = User(
                     telegram_id=telegram_id,
@@ -72,12 +79,15 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     units=30,
                     is_active=True,
                     last_payment_method="tribute",
+                    tier=new_tier,
                 )
                 session.add(user)
             else:
                 user.units += 30
                 user.is_active = True
                 user.last_payment_method = "tribute"
+                if new_tier == 'pro' or getattr(user, 'tier', 'plus') != 'pro':
+                    user.tier = new_tier
 
             await session.commit()
             total = user.units
@@ -259,7 +269,8 @@ async def api_get_profile(request: web.Request) -> web.Response:
                 "is_active": user.is_active, "units": user.units, "lang": user.lang or "",
                 "notify_expiry": getattr(user, 'notify_expiry', True),
                 "badge": getattr(user, 'badge', None),
-                "badges": [b.strip() for b in (getattr(user, 'badge', None) or "").split(",") if b.strip()]
+                "badges": [b.strip() for b in (getattr(user, 'badge', None) or "").split(",") if b.strip()],
+                "tier": getattr(user, 'tier', 'plus') or 'plus',
             })
     except Exception as e:
         logger.error(f"Error in api_get_profile: {e}")

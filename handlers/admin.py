@@ -671,6 +671,32 @@ async def cmd_remove_badge(message: Message, session: AsyncSession):
         await message.reply(f"✅ Все бейджи убраны у пользователя {nick}", parse_mode="HTML")
 
 
+# ─── /set_tier ───────────────────────────────────────────────────────────────
+
+VALID_TIERS = {"plus", "pro", "elite", "free"}
+
+@router.message(Command("set_tier"))
+async def cmd_set_tier(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split()[1:]
+    if len(args) != 2 or not args[0].isdigit():
+        await message.reply("Использование: /set_tier [user_id] [plus|pro|elite|free]")
+        return
+    tier = args[1].lower()
+    if tier not in VALID_TIERS:
+        await message.reply(f"❌ Неверный тир. Доступные: {', '.join(VALID_TIERS)}")
+        return
+    user = await get_user(session, int(args[0]))
+    if not user:
+        await message.reply(f"❌ Пользователь {args[0]} не найден.")
+        return
+    user.tier = tier
+    await session.commit()
+    nick = f"@{user.username}" if user.username else f"id{user.telegram_id}"
+    await message.reply(f"✅ Тир пользователя {nick} установлен: <b>{tier.upper()}</b>", parse_mode="HTML")
+
+
 # ─── /add_tag, /list_tags, /del_tag ──────────────────────────────────────────
 
 @router.message(Command("add_tag"))

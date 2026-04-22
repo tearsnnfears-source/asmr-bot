@@ -14,6 +14,10 @@ WEBHOOK_HOST    = os.getenv("WEBHOOK_HOST", "")
 TRIBUTE_BOT_URL     = os.getenv("TRIBUTE_BOT_URL", "")
 TRIBUTE_API_KEY     = os.getenv("TRIBUTE_API_KEY", "")
 TRIBUTE_DONATE_LINK = os.getenv("TRIBUTE_DONATE_LINK", "")
+TRIBUTE_SITE_WEBHOOK_URL = os.getenv(
+    "TRIBUTE_SITE_WEBHOOK_URL",
+    "https://play.asmrleaks.tv/api/payments/tribute/webhook",
+)
 
 # Tribute per-tier links  (startapp code → tier)
 TRIBUTE_PLUS_URL    = os.getenv("TRIBUTE_PLUS_URL",  "https://t.me/tribute/app?startapp=sQSn")

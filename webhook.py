@@ -3,13 +3,13 @@ import hmac
 import logging
 import json
 import urllib.parse
-from aiohttp import web
+from aiohttp import ClientSession, ClientTimeout, web
 from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select
 
 from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, assign_tier_badge
-from config import TRIBUTE_API_KEY, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, TRIBUTE_TIER_MAP, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL
+from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, TRIBUTE_TIER_MAP, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,28 @@ async def _notify_admins(text: str):
                 pass
     finally:
         await bot.session.close()
+
+async def forward_tribute_webhook(body: bytes, signature: str) -> None:
+    if not TRIBUTE_SITE_WEBHOOK_URL:
+        return
+
+    headers = {"Content-Type": "application/json"}
+    if signature:
+        headers["trbt-signature"] = signature
+
+    try:
+        timeout = ClientTimeout(total=8)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(TRIBUTE_SITE_WEBHOOK_URL, data=body, headers=headers) as response:
+                if response.status >= 400:
+                    response_text = await response.text()
+                    logger.warning(
+                        "Failed to forward Tribute webhook to site: status=%s body=%s",
+                        response.status,
+                        response_text[:300],
+                    )
+    except Exception as e:
+        logger.warning("Failed to forward Tribute webhook to site: %s", e)
 
 @web.middleware
 async def cors_middleware(request, handler):
@@ -46,6 +68,8 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         if not hmac.compare_digest(expected, signature):
             logger.warning("Invalid Tribute signature")
             return web.Response(status=403)
+
+    await forward_tribute_webhook(body, signature)
 
     try:
         data = json.loads(body)

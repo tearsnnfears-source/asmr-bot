@@ -193,6 +193,11 @@ async def init_db():
 
     if "postgresql" in DATABASE_URL:
         migrations = [
+            "ALTER TABLE artists ADD COLUMN IF NOT EXISTS photo_url VARCHAR(512)",
+            "ALTER TABLE artists ADD COLUMN IF NOT EXISTS profile_photo_url VARCHAR(512)",
+            "ALTER TABLE artists ADD COLUMN IF NOT EXISTS photos INTEGER DEFAULT 0",
+            "ALTER TABLE artists ADD COLUMN IF NOT EXISTS videos INTEGER DEFAULT 0",
+            "ALTER TABLE artists ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
             "ALTER TABLE artists ADD COLUMN IF NOT EXISTS tag_hot BOOLEAN DEFAULT FALSE",
             "ALTER TABLE artists ADD COLUMN IF NOT EXISTS tag_new BOOLEAN DEFAULT FALSE",
             "ALTER TABLE artists ADD COLUMN IF NOT EXISTS tag_prom BOOLEAN DEFAULT FALSE",
@@ -201,7 +206,14 @@ async def init_db():
             "ALTER TABLE videos ADD COLUMN IF NOT EXISTS thumbnail_url VARCHAR(512)",
             "ALTER TABLE artists ADD COLUMN IF NOT EXISTS topic_url VARCHAR(512)",
             "CREATE TABLE IF NOT EXISTS artist_content (id SERIAL PRIMARY KEY, artist_name VARCHAR(128), content_type VARCHAR(8), title VARCHAR(256), url TEXT, thumbnail_url TEXT, tags VARCHAR(256), sort_order INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW())",
+            "ALTER TABLE artist_content ADD COLUMN IF NOT EXISTS artist_name VARCHAR(128)",
+            "ALTER TABLE artist_content ADD COLUMN IF NOT EXISTS content_type VARCHAR(8)",
+            "ALTER TABLE artist_content ADD COLUMN IF NOT EXISTS title VARCHAR(256)",
+            "ALTER TABLE artist_content ADD COLUMN IF NOT EXISTS url TEXT",
             "ALTER TABLE artist_content ADD COLUMN IF NOT EXISTS thumbnail_url TEXT",
+            "ALTER TABLE artist_content ADD COLUMN IF NOT EXISTS tags VARCHAR(256)",
+            "ALTER TABLE artist_content ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0",
+            "ALTER TABLE artist_content ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
             "CREATE INDEX IF NOT EXISTS idx_artist_content_name ON artist_content (artist_name)",
             "CREATE TABLE IF NOT EXISTS tags (id SERIAL PRIMARY KEY, name VARCHAR(64) UNIQUE, color VARCHAR(16) DEFAULT '#FFFFFF', created_at TIMESTAMP DEFAULT NOW())",
             "CREATE TABLE IF NOT EXISTS video_reactions (id SERIAL PRIMARY KEY, content_id INTEGER, telegram_id BIGINT, emoji VARCHAR(8), created_at TIMESTAMP DEFAULT NOW())",
@@ -225,12 +237,12 @@ async def init_db():
             "CREATE TABLE IF NOT EXISTS pending_invites (id SERIAL PRIMARY KEY, telegram_id BIGINT, invite_link TEXT, used BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())",
             "CREATE INDEX IF NOT EXISTS idx_pending_invites_user ON pending_invites (telegram_id)",
         ]
-        try:
-            async with engine.begin() as conn:
-                for sql in migrations:
+        for sql in migrations:
+            try:
+                async with engine.begin() as conn:
                     await conn.execute(text(sql))
-        except Exception as e:
-            logger.warning(f"Migration warning: {e}")
+            except Exception as e:
+                logger.warning(f"Migration warning for {sql!r}: {e}")
 
     # Заполняем thumbnail_url для старых видео без превью
     await _backfill_thumbnails()

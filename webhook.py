@@ -8,7 +8,7 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select
 
-from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, assign_tier_badge
+from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, assign_tier_badge, _auto_thumbnail
 from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_TIER_MAP, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_WALLET_USDT_TRC20, CRYPTO_WALLET_USDT_TON, CRYPTO_WALLET_ETH, CRYPTO_USDT_PRICES
 
 logger = logging.getLogger(__name__)
@@ -492,7 +492,7 @@ async def api_get_videos(request: web.Request) -> web.Response:
             videos = result.scalars().all()
             videos_data = [{
                 "id": v.id, "title": v.title or "", "url": v.url,
-                "embed_url": v.url, "thumbnail_url": v.thumbnail_url or "",
+                "embed_url": v.url, "thumbnail_url": v.thumbnail_url or _auto_thumbnail(v.url) or "",
                 "artist_name": v.artist_name, "tags": v.tags or "",
                 "created_at": v.created_at.isoformat() if v.created_at else ""
             } for v in videos]
@@ -522,7 +522,7 @@ async def api_get_artist_content(request: web.Request) -> web.Response:
         "artist": artist_name,
         "videos": [
             {"id": v.id, "title": v.title or "", "url": v.url,
-             "thumbnail_url": v.thumbnail_url or "",
+             "thumbnail_url": v.thumbnail_url or _auto_thumbnail(v.url) or "",
              "tags": v.tags or "", "sort_order": v.sort_order}
             for v in videos
         ],
@@ -532,7 +532,7 @@ async def api_get_artist_content(request: web.Request) -> web.Response:
         ],
         "shorts": [
             {"id": s.id, "title": s.title or "", "url": s.url,
-             "thumbnail_url": s.thumbnail_url or "",
+             "thumbnail_url": s.thumbnail_url or _auto_thumbnail(s.url) or "",
              "tags": s.tags or "", "sort_order": s.sort_order}
             for s in shorts
         ],
@@ -671,7 +671,7 @@ async def api_get_shorts(request: web.Request) -> web.Response:
             shorts = result.scalars().all()
         return web.json_response({"shorts": [
             {"id": s.id, "title": s.title or "", "url": s.url,
-             "thumbnail_url": s.thumbnail_url or "",
+             "thumbnail_url": s.thumbnail_url or _auto_thumbnail(s.url) or "",
              "artist_name": s.artist_name, "tags": s.tags or "",
              "created_at": s.created_at.isoformat() if s.created_at else ""}
             for s in shorts

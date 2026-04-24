@@ -173,6 +173,25 @@ def _bunny_thumbnail(embed_url: str | None) -> str | None:
     return f"https://iframe.mediadelivery.net/thumbnail/{library_id}/{video_id}"
 
 
+def _auto_thumbnail(url: str | None) -> str | None:
+    """Пытается сгенерировать URL превью из любого Bunny CDN URL."""
+    if not url:
+        return None
+    # Bunny embed: iframe.mediadelivery.net/embed/{lib}/{id}
+    m = re.search(r'embed/(\d+)/([a-f0-9-]+)', url, re.I)
+    if m:
+        return f"https://iframe.mediadelivery.net/thumbnail/{m.group(1)}/{m.group(2)}"
+    # Bunny CDN stream: vz-xxx.b-cdn.net/{video_id}/playlist.m3u8
+    m = re.search(r'(https://[^/]+\.b-cdn\.net)/([a-f0-9-]+)/playlist\.m3u8', url, re.I)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}/thumbnail.jpg"
+    # Bunny CDN generic: vz-xxx.b-cdn.net/{video_id}/...
+    m = re.search(r'(https://[^/]+\.b-cdn\.net)/([a-f0-9-]{36})/', url, re.I)
+    if m:
+        return f"{m.group(1)}/{m.group(2)}/thumbnail.jpg"
+    return None
+
+
 class Video(Base):
     __tablename__ = "videos"
 
@@ -251,10 +270,11 @@ async def init_db():
 
 
 async def _backfill_thumbnails():
-    """Проставляет thumbnail_url для видео где его нет."""
+    """Проставляет thumbnail_url для видео и контента где его нет."""
     from sqlalchemy import select
     try:
         async with async_session() as session:
+            # Old Video table
             result = await session.execute(
                 select(Video).where(Video.thumbnail_url == None, Video.is_active == True)
             )
@@ -265,9 +285,21 @@ async def _backfill_thumbnails():
                 if thumb:
                     video.thumbnail_url = thumb
                     updated += 1
+
+            # ArtistContent (shorts, videos, photos)
+            result2 = await session.execute(
+                select(ArtistContent).where(ArtistContent.thumbnail_url == None)
+            )
+            contents = result2.scalars().all()
+            for item in contents:
+                thumb = _auto_thumbnail(item.url)
+                if thumb:
+                    item.thumbnail_url = thumb
+                    updated += 1
+
             if updated:
                 await session.commit()
-                logger.info(f"Backfilled thumbnails for {updated} videos")
+                logger.info(f"Backfilled thumbnails for {updated} items")
     except Exception as e:
         logger.warning(f"Thumbnail backfill error: {e}")
 
@@ -431,6 +463,8 @@ async def get_artist_content(session: AsyncSession, artist_name: str,
 async def add_artist_content(session: AsyncSession, artist_name: str, content_type: str,
                               url: str, title: str | None = None, tags: str | None = None,
                               sort_order: int = 0, thumbnail_url: str | None = None) -> ArtistContent:
+    if not thumbnail_url:
+        thumbnail_url = _auto_thumbnail(url)
     item = ArtistContent(
         artist_name=artist_name, content_type=content_type,
         url=url, title=title, tags=tags, sort_order=sort_order,

@@ -680,6 +680,108 @@ async def api_get_shorts(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def api_watch_progress(request: web.Request) -> web.Response:
+    """POST /miniapp/watch_progress — save/update watch position"""
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    try:
+        data      = await request.json()
+        content_id = int(data.get("content_id", 0))
+        progress   = int(data.get("progress_seconds", 0))
+        duration   = int(data.get("duration_seconds", 0))
+    except Exception:
+        return web.json_response({"error": "Bad body"}, status=400)
+
+    params = dict(urllib.parse.parse_qsl(user_data["init_data"]))
+    user_id = None
+    if 'user' in params:
+        user_id = json.loads(params['user']).get('id')
+    if not user_id or not content_id:
+        return web.json_response({"ok": False})
+
+    from sqlalchemy import text as _t
+    async with async_session() as session:
+        await session.execute(_t("""
+            INSERT INTO watch_history (telegram_id, content_id, progress_seconds, duration_seconds, updated_at)
+            VALUES (:uid, :cid, :prog, :dur, NOW())
+            ON CONFLICT (telegram_id, content_id)
+            DO UPDATE SET progress_seconds=:prog, duration_seconds=:dur, updated_at=NOW()
+        """), {"uid": user_id, "cid": content_id, "prog": progress, "dur": duration})
+        await session.commit()
+    return web.json_response({"ok": True})
+
+
+async def api_continue_watching(request: web.Request) -> web.Response:
+    """POST /miniapp/continue_watching — get user's in-progress videos"""
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+
+    params = dict(urllib.parse.parse_qsl(user_data["init_data"]))
+    user_id = None
+    if 'user' in params:
+        user_id = json.loads(params['user']).get('id')
+    if not user_id:
+        return web.json_response({"items": []})
+
+    from sqlalchemy import text as _t
+    async with async_session() as session:
+        result = await session.execute(_t("""
+            SELECT wh.content_id, wh.progress_seconds, wh.duration_seconds,
+                   ac.title, ac.url, ac.thumbnail_url, ac.artist_name, ac.tags
+            FROM watch_history wh
+            JOIN artist_content ac ON ac.id = wh.content_id
+            WHERE wh.telegram_id = :uid
+              AND wh.progress_seconds > 0
+              AND wh.duration_seconds > 30
+              AND CAST(wh.progress_seconds AS FLOAT) / NULLIF(wh.duration_seconds,0) BETWEEN 0.03 AND 0.92
+            ORDER BY wh.updated_at DESC
+            LIMIT 10
+        """), {"uid": user_id})
+        rows = result.mappings().all()
+
+    return web.json_response({"items": [
+        {"id": r["content_id"], "title": r["title"] or "",
+         "url": r["url"], "artist_name": r["artist_name"] or "",
+         "thumbnail_url": r["thumbnail_url"] or _auto_thumbnail(r["url"]) or "",
+         "tags": r["tags"] or "",
+         "progress": r["progress_seconds"], "duration": r["duration_seconds"]}
+        for r in rows
+    ]})
+
+
+async def api_search(request: web.Request) -> web.Response:
+    """GET /miniapp/search?q=TEXT&limit=20"""
+    q     = request.query.get("q", "").strip()
+    limit = min(int(request.query.get("limit", 20)), 50)
+    if len(q) < 2:
+        return web.json_response({"results": []})
+
+    from sqlalchemy import or_
+    async with async_session() as session:
+        result = await session.execute(
+            select(ArtistContent)
+            .where(ArtistContent.content_type == "video")
+            .where(or_(
+                ArtistContent.title.ilike(f"%{q}%"),
+                ArtistContent.artist_name.ilike(f"%{q}%"),
+                ArtistContent.tags.ilike(f"%{q}%"),
+            ))
+            .order_by(ArtistContent.created_at.desc())
+            .limit(limit)
+        )
+        items = result.scalars().all()
+
+    return web.json_response({"results": [
+        {"id": v.id, "title": v.title or "", "url": v.url,
+         "thumbnail_url": v.thumbnail_url or _auto_thumbnail(v.url) or "",
+         "artist_name": v.artist_name or "", "tags": v.tags or "",
+         "created_at": v.created_at.isoformat() if v.created_at else ""}
+        for v in items
+    ]})
+
+
 async def api_get_tags(request: web.Request) -> web.Response:
     """GET /miniapp/tags — все теги с цветами"""
     async with async_session() as session:
@@ -1165,6 +1267,9 @@ def create_app() -> web.Application:
     app.router.add_get("/miniapp/artist_content", api_get_artist_content)
     app.router.add_post("/miniapp/crypto/checkout", api_crypto_checkout)
     app.router.add_post("/miniapp/crypto/claim", api_crypto_claim)
+    app.router.add_post("/miniapp/watch_progress", api_watch_progress)
+    app.router.add_post("/miniapp/continue_watching", api_continue_watching)
+    app.router.add_get("/miniapp/search", api_search)
     app.router.add_get("/miniapp/shorts", api_get_shorts)
     app.router.add_get("/miniapp/tags", api_get_tags)
     app.router.add_get("/miniapp/video/{id}/reactions", api_get_video_reactions)

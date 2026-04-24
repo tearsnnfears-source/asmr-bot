@@ -697,6 +697,70 @@ async def cmd_set_tier(message: Message, session: AsyncSession):
     await message.reply(f"✅ Тир пользователя {nick} установлен: <b>{tier.upper()}</b>", parse_mode="HTML")
 
 
+# ─── /confirm_crypto ─────────────────────────────────────────────────────────
+
+@router.message(Command("confirm_crypto"))
+async def cmd_confirm_crypto(message: Message, session: AsyncSession, bot: Bot):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split()
+    if len(args) < 2:
+        await message.reply("Использование: /confirm_crypto [order_uuid]")
+        return
+    order_uuid = args[1].strip()
+
+    from sqlalchemy import text as _text
+    from database import async_session as _session
+    from config import INVITE_LINK, GROUP_ID
+    from database import User, get_user, assign_tier_badge
+
+    async with _session() as s:
+        result = await s.execute(_text("SELECT * FROM crypto_checkouts WHERE order_uuid = :uuid"), {"uuid": order_uuid})
+        row = result.mappings().one_or_none()
+        if not row:
+            await message.reply(f"❌ Заказ {order_uuid} не найден.")
+            return
+        if row["status"] == "confirmed":
+            await message.reply("⚠️ Заказ уже подтверждён.")
+            return
+
+        await s.execute(_text("UPDATE crypto_checkouts SET status = 'confirmed' WHERE order_uuid = :uuid"), {"uuid": order_uuid})
+
+        user = await get_user(s, row["telegram_id"])
+        if not user:
+            from database import User
+            user = User(telegram_id=row["telegram_id"], units=31, is_active=True, tier=row["tier"], last_payment_method="crypto")
+            s.add(user)
+        else:
+            user.units += 31
+            user.is_active = True
+            user.tier = row["tier"]
+            user.last_payment_method = "crypto"
+        assign_tier_badge(user)
+        await s.commit()
+
+    # Send invite
+    try:
+        from datetime import timedelta, datetime
+        link_obj = await bot.create_chat_invite_link(GROUP_ID, member_limit=1,
+            expire_date=int((datetime.utcnow() + timedelta(hours=72)).timestamp()))
+        invite = link_obj.invite_link
+    except Exception:
+        invite = INVITE_LINK
+
+    lang = "en"
+    try:
+        await bot.send_message(row["telegram_id"],
+            f"✅ <b>Crypto payment confirmed!</b>\n\n"
+            f"📅 Added: <b>31 days</b>\n"
+            f"🔗 Join the group: {invite}",
+            parse_mode="HTML")
+    except Exception:
+        pass
+
+    await message.reply(f"✅ Заказ <code>{order_uuid}</code> подтверждён, пользователю выдано 31 день.", parse_mode="HTML")
+
+
 # ─── /sync_tier_badges ───────────────────────────────────────────────────────
 
 @router.message(Command("sync_tier_badges"))

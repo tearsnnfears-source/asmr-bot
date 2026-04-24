@@ -47,3 +47,15 @@ STARS_TIER_PRICES = {
 # Ночной режим (МСК)
 NIGHT_START = 23
 NIGHT_END   = 8
+
+# Crypto payment wallets
+CRYPTO_WALLET_USDT_TRC20 = os.getenv("CRYPTO_WALLET_USDT_TRC20", "")
+CRYPTO_WALLET_USDT_TON   = os.getenv("CRYPTO_WALLET_USDT_TON",   "")
+CRYPTO_WALLET_ETH         = os.getenv("CRYPTO_WALLET_ETH",        "")
+
+# Crypto prices in USDT per tier
+CRYPTO_USDT_PRICES = {
+    'plus':  6,
+    'pro':   8,
+    'elite': 10,
+}

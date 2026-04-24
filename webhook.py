@@ -9,7 +9,7 @@ from aiogram.types import LabeledPrice
 from sqlalchemy import select
 
 from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, assign_tier_badge
-from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, TRIBUTE_TIER_MAP, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL
+from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_TIER_MAP, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_WALLET_USDT_TRC20, CRYPTO_WALLET_USDT_TON, CRYPTO_WALLET_ETH, CRYPTO_USDT_PRICES
 
 logger = logging.getLogger(__name__)
 
@@ -104,18 +104,22 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                 if amount_eur >= 8:
                     new_tier = 'pro'
 
+            TRIBUTE_DAYS = 31
             if not user:
                 user = User(
                     telegram_id=telegram_id,
                     username=payload.get("telegram_username"),
-                    units=30,
+                    units=TRIBUTE_DAYS,
                     is_active=True,
                     last_payment_method="tribute",
                     tier=new_tier,
                 )
                 session.add(user)
+                grace_debt = 0
             else:
-                user.units += 30
+                # Grace period: preserve negative balance (anti-abuse)
+                grace_debt = min(0, user.units)  # e.g. -3 if in grace period
+                user.units += TRIBUTE_DAYS  # -3 + 31 = 28 effective days
                 user.is_active = True
                 user.last_payment_method = "tribute"
                 if new_tier == 'pro' or getattr(user, 'tier', 'plus') != 'pro':
@@ -129,10 +133,11 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         # Уведомление админу о Tribute оплате
         username = payload.get("telegram_username", "")
         nick = f"@{username}" if username else f"id{telegram_id}"
+        grace_note = f" (grace debt: {grace_debt}d)" if grace_debt < 0 else ""
         await _notify_admins(
             f"💳 <b>Новая оплата — Tribute</b>\n"
             f"👤 {nick} | <code>{telegram_id}</code>\n"
-            f"📅 +30 дней | Итого: {total} дн."
+            f"📅 +{TRIBUTE_DAYS}{grace_note} | Итого: {total} дн."
         )
 
         bot = Bot(token=BOT_TOKEN)
@@ -154,12 +159,12 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         try:
             if lang == "ru":
                 text = (f"✅ <b>Оплата через Tribute прошла успешно!</b>\n\n"
-                        f"📅 Добавлено: <b>30 дней</b>\n"
+                        f"📅 Добавлено: <b>31 день</b>\n"
                         f"📅 Итого: <b>{total} дней</b>\n\n"
                         f"🔗 Вернитесь в мини-апп — там вас ждёт ссылка для вступления.")
             else:
                 text = (f"✅ <b>Tribute payment successful!</b>\n\n"
-                        f"📅 Added: <b>30 days</b>\n"
+                        f"📅 Added: <b>31 days</b>\n"
                         f"📅 Total: <b>{total} days</b>\n\n"
                         f"🔗 Return to the mini-app — your join link is waiting there.")
             await bot.send_message(telegram_id, text, parse_mode="HTML")
@@ -449,14 +454,14 @@ async def api_free_trial(request: web.Request) -> web.Response:
             user = result.scalar_one_or_none()
 
             if not user:
-                user = User(telegram_id=user_id, units=3, trial_used=True, is_active=True)
+                user = User(telegram_id=user_id, units=5, trial_used=True, is_active=True)
                 session.add(user)
                 await session.commit()
                 await session.refresh(user)
             else:
                 if user.trial_used:
                     return web.json_response({"error": "Trial already used"}, status=409)
-                user.units += 3
+                user.units += 5
                 user.trial_used = True
                 user.is_active = True
                 await session.commit()
@@ -512,6 +517,7 @@ async def api_get_artist_content(request: web.Request) -> web.Response:
     async with async_session() as session:
         videos = await get_artist_content(session, artist_name, "video")
         photos = await get_artist_content(session, artist_name, "photo")
+        shorts = await get_artist_content(session, artist_name, "short")
     return web.json_response({
         "artist": artist_name,
         "videos": [
@@ -524,7 +530,154 @@ async def api_get_artist_content(request: web.Request) -> web.Response:
             {"id": p.id, "url": p.url, "sort_order": p.sort_order}
             for p in photos
         ],
+        "shorts": [
+            {"id": s.id, "title": s.title or "", "url": s.url,
+             "thumbnail_url": s.thumbnail_url or "",
+             "tags": s.tags or "", "sort_order": s.sort_order}
+            for s in shorts
+        ],
     })
+
+
+async def api_crypto_checkout(request: web.Request) -> web.Response:
+    """POST /miniapp/crypto/checkout — create a crypto payment order"""
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    try:
+        data = await request.json()
+        tier     = data.get("tier", "plus")
+        currency = data.get("currency", "USDT_TRC20")  # USDT_TRC20 | USDT_TON | ETH
+    except Exception:
+        return web.json_response({"error": "Bad body"}, status=400)
+
+    params = dict(urllib.parse.parse_qsl(user_data["init_data"]))
+    user_id = None
+    if 'user' in params:
+        user_id = json.loads(params['user']).get('id')
+    if not user_id:
+        return web.json_response({"error": "Cannot parse user"}, status=400)
+
+    wallets = {
+        "USDT_TRC20": (CRYPTO_WALLET_USDT_TRC20, "TRC20",    "USDT"),
+        "USDT_TON":   (CRYPTO_WALLET_USDT_TON,   "TON",      "USDT"),
+        "ETH":        (CRYPTO_WALLET_ETH,         "Ethereum", "ETH"),
+    }
+    if currency not in wallets or not wallets[currency][0]:
+        return web.json_response({"error": "Currency not configured"}, status=400)
+
+    wallet_addr, network, symbol = wallets[currency]
+    amount = CRYPTO_USDT_PRICES.get(tier, 6)
+
+    import uuid as _uuid
+    from datetime import timedelta, datetime as _dt
+    order_uuid = f"crypto_{_uuid.uuid4().hex[:16]}"
+    expires_at = _dt.now(__import__('datetime').timezone.utc).replace(tzinfo=None) + timedelta(hours=24)
+
+    async with async_session() as session:
+        await session.execute(
+            __import__('sqlalchemy').text(
+                "INSERT INTO crypto_checkouts (order_uuid, telegram_id, tier, crypto_amount, crypto_currency, network, wallet_address, expires_at) "
+                "VALUES (:uuid, :tid, :tier, :amount, :currency, :network, :wallet, :exp)"
+            ),
+            {"uuid": order_uuid, "tid": user_id, "tier": tier,
+             "amount": amount, "currency": symbol, "network": network,
+             "wallet": wallet_addr, "exp": expires_at}
+        )
+        await session.commit()
+
+    for admin_id in ADMIN_IDS:
+        try:
+            bot = Bot(token=BOT_TOKEN)
+            await bot.send_message(admin_id,
+                f"💎 <b>Новый крипто-заказ</b>\n"
+                f"👤 <code>{user_id}</code> | Тир: <b>{tier.upper()}</b>\n"
+                f"💰 {amount} {symbol} ({network})\n"
+                f"🔑 Заказ: <code>{order_uuid}</code>\n"
+                f"Подтвердить: /confirm_crypto {order_uuid}",
+                parse_mode="HTML")
+        except Exception:
+            pass
+
+    return web.json_response({
+        "order_uuid": order_uuid,
+        "wallet_address": wallet_addr,
+        "network": network,
+        "symbol": symbol,
+        "amount": amount,
+        "expires_at": expires_at.isoformat(),
+    })
+
+
+async def api_crypto_claim(request: web.Request) -> web.Response:
+    """POST /miniapp/crypto/claim — user submits tx hash"""
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    try:
+        data = await request.json()
+        order_uuid = data.get("order_uuid", "")
+        tx_hash    = data.get("tx_hash", "").strip()
+    except Exception:
+        return web.json_response({"error": "Bad body"}, status=400)
+
+    if not order_uuid or not tx_hash:
+        return web.json_response({"error": "order_uuid and tx_hash required"}, status=400)
+
+    from sqlalchemy import text as _text
+    async with async_session() as session:
+        result = await session.execute(
+            _text("SELECT * FROM crypto_checkouts WHERE order_uuid = :uuid"),
+            {"uuid": order_uuid}
+        )
+        row = result.mappings().one_or_none()
+        if not row:
+            return web.json_response({"error": "Order not found"}, status=404)
+        if row["status"] not in ("pending",):
+            return web.json_response({"error": "Order already processed"}, status=409)
+        await session.execute(
+            _text("UPDATE crypto_checkouts SET tx_hash = :tx, status = 'claimed' WHERE order_uuid = :uuid"),
+            {"tx": tx_hash, "uuid": order_uuid}
+        )
+        await session.commit()
+
+    for admin_id in ADMIN_IDS:
+        try:
+            bot = Bot(token=BOT_TOKEN)
+            await bot.send_message(admin_id,
+                f"💎 <b>Крипто TX получен!</b>\n"
+                f"👤 <code>{row['telegram_id']}</code> | <b>{row['tier'].upper()}</b>\n"
+                f"💰 {row['crypto_amount']} {row['crypto_currency']} ({row['network']})\n"
+                f"🔗 TX: <code>{tx_hash}</code>\n"
+                f"✅ Подтвердить: /confirm_crypto {order_uuid}",
+                parse_mode="HTML")
+        except Exception:
+            pass
+
+    return web.json_response({"status": "claimed"})
+
+
+async def api_get_shorts(request: web.Request) -> web.Response:
+    """GET /miniapp/shorts?limit=20 — latest shorts for home page scroll"""
+    try:
+        limit = int(request.query.get('limit', 20))
+        async with async_session() as session:
+            result = await session.execute(
+                select(ArtistContent)
+                .where(ArtistContent.content_type == "short")
+                .order_by(ArtistContent.created_at.desc())
+                .limit(limit)
+            )
+            shorts = result.scalars().all()
+        return web.json_response({"shorts": [
+            {"id": s.id, "title": s.title or "", "url": s.url,
+             "thumbnail_url": s.thumbnail_url or "",
+             "artist_name": s.artist_name, "tags": s.tags or "",
+             "created_at": s.created_at.isoformat() if s.created_at else ""}
+            for s in shorts
+        ]})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
 
 
 async def api_get_tags(request: web.Request) -> web.Response:
@@ -1010,6 +1163,9 @@ def create_app() -> web.Application:
     app.router.add_post("/miniapp/playlists/remove_item", api_playlist_remove_item)
     app.router.add_post("/miniapp/playlists/items", api_playlist_items)
     app.router.add_get("/miniapp/artist_content", api_get_artist_content)
+    app.router.add_post("/miniapp/crypto/checkout", api_crypto_checkout)
+    app.router.add_post("/miniapp/crypto/claim", api_crypto_claim)
+    app.router.add_get("/miniapp/shorts", api_get_shorts)
     app.router.add_get("/miniapp/tags", api_get_tags)
     app.router.add_get("/miniapp/video/{id}/reactions", api_get_video_reactions)
     app.router.add_post("/miniapp/video/{id}/react", api_post_reaction)

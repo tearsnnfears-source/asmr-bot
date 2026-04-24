@@ -25,16 +25,40 @@ async def daily_unit_check(bot: Bot):
 
     async with async_session() as session:
         result = await session.execute(
-            select(User).where(User.is_active == True)
+            select(User).where(User.is_active == True, User.units > -7)
         )
         users = result.scalars().all()
 
+        GRACE_LIMIT = -7  # kick after 7 extra days
+
         for user in users:
-            user.units = max(0, user.units - 1)
+            user.units -= 1  # allow going negative (grace period)
 
             if user.units == 0:
+                # Subscription just ended — warn but don't kick yet
+                try:
+                    lang = user.lang or "en"
+                    msg = ("⏰ <b>Подписка закончилась!</b>\n\nУ тебя есть <b>7 дней</b> чтобы продлить и не потерять доступ." if lang == "ru"
+                           else "⏰ <b>Your subscription has ended!</b>\n\nYou have <b>7 grace days</b> to renew before losing access.")
+                    await bot.send_message(user.telegram_id, msg, parse_mode="HTML")
+                except Exception:
+                    pass
+
+            elif user.units < 0 and user.units > GRACE_LIMIT:
+                # Grace period warning
+                days_left = abs(user.units)
+                remaining = 7 - days_left
+                try:
+                    lang = user.lang or "en"
+                    msg = (f"⚠️ <b>Льготный период: {remaining} дн. осталось</b>\nПродли подписку, иначе потеряешь доступ." if lang == "ru"
+                           else f"⚠️ <b>Grace period: {remaining} day(s) left</b>\nRenew now to keep your access.")
+                    await bot.send_message(user.telegram_id, msg, parse_mode="HTML")
+                except Exception:
+                    pass
+
+            elif user.units <= GRACE_LIMIT:
                 user.tier = 'plus'  # reset tier on expiry
-                # Кик
+                # Кик после grace period
                 try:
                     await bot.ban_chat_member(GROUP_ID, user.telegram_id)
                     await bot.unban_chat_member(GROUP_ID, user.telegram_id)
@@ -42,7 +66,6 @@ async def daily_unit_check(bot: Bot):
                     kicked += 1
                     logger.info(f"Auto-kicked {user.telegram_id}")
 
-                    # Уведомление админу
                     nick = f"@{user.username}" if user.username else f"id{user.telegram_id}"
                     for admin_id in ADMIN_IDS:
                         try:
@@ -50,7 +73,7 @@ async def daily_unit_check(bot: Bot):
                                 admin_id,
                                 f"🚫 <b>Юзер удалён из группы</b>\n"
                                 f"👤 {nick} | <code>{user.telegram_id}</code>\n"
-                                f"📅 Подписка закончилась",
+                                f"📅 Grace period истёк",
                                 parse_mode="HTML"
                             )
                         except Exception:
@@ -58,14 +81,9 @@ async def daily_unit_check(bot: Bot):
                 except Exception as e:
                     logger.error(f"Cannot kick {user.telegram_id}: {e}")
 
-                # Уведомление
                 try:
                     lang = user.lang or "en"
-                    await bot.send_message(
-                        user.telegram_id,
-                        t("kicked_message", lang),
-                        parse_mode="HTML",
-                    )
+                    await bot.send_message(user.telegram_id, t("kicked_message", lang), parse_mode="HTML")
                 except Exception:
                     pass
 

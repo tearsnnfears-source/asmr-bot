@@ -84,8 +84,8 @@ async def cb_free_trial(call: CallbackQuery, session: AsyncSession, bot: Bot):
         await call.answer(msg, show_alert=True)
         return
 
-    # Начисляем 3 дня
-    user.units += 3
+    # Начисляем 5 дней
+    user.units += 5
     user.trial_used = True
     user.is_active = True
     await session.commit()
@@ -97,18 +97,18 @@ async def cb_free_trial(call: CallbackQuery, session: AsyncSession, bot: Bot):
     await _notify_admins(bot,
         f"🎁 <b>Новый триал</b>\n"
         f"👤 {nick} | <code>{user.telegram_id}</code>\n"
-        f"📅 Активировал 3 бесплатных дня"
+        f"📅 Активировал 5 бесплатных дней"
     )
 
     if lang == "ru":
         text = (
-            "🎁 <b>Вам активировано 3 бесплатных дня!</b>\n\n"
+            "🎁 <b>Вам активировано 5 бесплатных дней!</b>\n\n"
             "📅 Когда дни закончатся — доступ будет закрыт.\n\n"
             f"🔗 Вступить в группу:\n{INVITE_LINK}"
         )
     else:
         text = (
-            "🎁 <b>3 free days activated!</b>\n\n"
+            "🎁 <b>5 free days activated!</b>\n\n"
             "📅 When the days run out — access will be closed.\n\n"
             f"🔗 Join the group:\n{INVITE_LINK}"
         )

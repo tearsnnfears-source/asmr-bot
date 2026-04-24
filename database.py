@@ -231,6 +231,8 @@ async def init_db():
             "DO $$ BEGIN IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='badge' AND character_maximum_length=32) THEN ALTER TABLE users ALTER COLUMN badge TYPE VARCHAR(256); END IF; END $$",
             "CREATE TABLE IF NOT EXISTS custom_badges (id SERIAL PRIMARY KEY, name VARCHAR(32) UNIQUE, color VARCHAR(16), created_at TIMESTAMP DEFAULT NOW())",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS tier VARCHAR(16) DEFAULT 'plus'",
+            "CREATE TABLE IF NOT EXISTS crypto_checkouts (id SERIAL PRIMARY KEY, order_uuid VARCHAR(64) UNIQUE, telegram_id BIGINT, tier VARCHAR(16) DEFAULT 'plus', crypto_amount NUMERIC(12,4), crypto_currency VARCHAR(16), network VARCHAR(32), wallet_address TEXT, tx_hash TEXT, status VARCHAR(16) DEFAULT 'pending', expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW())",
+            "CREATE INDEX IF NOT EXISTS idx_crypto_checkouts_user ON crypto_checkouts (telegram_id)",
             "INSERT INTO custom_badges (name, color) VALUES ('PLUS', '#FF7EC8') ON CONFLICT (name) DO NOTHING",
             "INSERT INTO custom_badges (name, color) VALUES ('PRO', '#00E5FF') ON CONFLICT (name) DO NOTHING",
             "INSERT INTO custom_badges (name, color) VALUES ('ELITE', '#FFD700') ON CONFLICT (name) DO NOTHING",

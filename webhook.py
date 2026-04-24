@@ -665,7 +665,7 @@ async def api_get_shorts(request: web.Request) -> web.Response:
             result = await session.execute(
                 select(ArtistContent)
                 .where(ArtistContent.content_type == "short")
-                .order_by(ArtistContent.created_at.desc())
+                .order_by(__import__('sqlalchemy').func.random())
                 .limit(limit)
             )
             shorts = result.scalars().all()

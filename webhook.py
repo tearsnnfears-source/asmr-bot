@@ -782,6 +782,146 @@ async def api_search(request: web.Request) -> web.Response:
     ]})
 
 
+async def api_toggle_follow(request: web.Request) -> web.Response:
+    """POST /miniapp/follow — toggle artist follow, returns {following: bool, count: int}"""
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    try:
+        data        = await request.json()
+        artist_name = data.get("artist_name", "").strip()
+    except Exception:
+        return web.json_response({"error": "Bad body"}, status=400)
+    if not artist_name:
+        return web.json_response({"error": "artist_name required"}, status=400)
+
+    params  = dict(urllib.parse.parse_qsl(user_data["init_data"]))
+    user_id = None
+    if 'user' in params:
+        user_id = json.loads(params['user']).get('id')
+    if not user_id:
+        return web.json_response({"error": "Cannot parse user"}, status=400)
+
+    from sqlalchemy import text as _t
+    async with async_session() as session:
+        existing = await session.execute(
+            _t("SELECT id FROM artist_follows WHERE telegram_id=:uid AND artist_name=:name"),
+            {"uid": user_id, "name": artist_name}
+        )
+        row = existing.scalar_one_or_none()
+        if row:
+            await session.execute(
+                _t("DELETE FROM artist_follows WHERE telegram_id=:uid AND artist_name=:name"),
+                {"uid": user_id, "name": artist_name}
+            )
+            following = False
+        else:
+            await session.execute(
+                _t("INSERT INTO artist_follows (telegram_id, artist_name) VALUES (:uid, :name) ON CONFLICT DO NOTHING"),
+                {"uid": user_id, "name": artist_name}
+            )
+            following = True
+        await session.commit()
+        count_row = await session.execute(
+            _t("SELECT COUNT(*) FROM artist_follows WHERE telegram_id=:uid"), {"uid": user_id}
+        )
+        count = count_row.scalar() or 0
+    return web.json_response({"following": following, "count": int(count)})
+
+
+async def api_get_follows(request: web.Request) -> web.Response:
+    """POST /miniapp/follows — list of followed artist names + their recent video"""
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    params  = dict(urllib.parse.parse_qsl(user_data["init_data"]))
+    user_id = None
+    if 'user' in params:
+        user_id = json.loads(params['user']).get('id')
+    if not user_id:
+        return web.json_response({"artists": []})
+
+    from sqlalchemy import text as _t
+    async with async_session() as session:
+        result = await session.execute(
+            _t("SELECT af.artist_name, a.photo_url, a.profile_photo_url FROM artist_follows af "
+               "LEFT JOIN artists a ON a.name = af.artist_name "
+               "WHERE af.telegram_id=:uid ORDER BY af.created_at DESC"),
+            {"uid": user_id}
+        )
+        rows = result.mappings().all()
+    return web.json_response({"artists": [
+        {"name": r["artist_name"], "photo_url": r["photo_url"] or "", "profile_photo_url": r["profile_photo_url"] or ""}
+        for r in rows
+    ]})
+
+
+async def api_followed_feed(request: web.Request) -> web.Response:
+    """POST /miniapp/followed_feed — recent videos from followed artists"""
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    params  = dict(urllib.parse.parse_qsl(user_data["init_data"]))
+    user_id = None
+    if 'user' in params:
+        user_id = json.loads(params['user']).get('id')
+    if not user_id:
+        return web.json_response({"videos": []})
+
+    from sqlalchemy import text as _t
+    async with async_session() as session:
+        result = await session.execute(_t("""
+            SELECT ac.id, ac.title, ac.url, ac.thumbnail_url, ac.artist_name, ac.tags, ac.created_at
+            FROM artist_content ac
+            WHERE ac.content_type = 'video'
+              AND ac.artist_name IN (
+                SELECT artist_name FROM artist_follows WHERE telegram_id = :uid
+              )
+            ORDER BY ac.created_at DESC
+            LIMIT 20
+        """), {"uid": user_id})
+        rows = result.mappings().all()
+    return web.json_response({"videos": [
+        {"id": r["id"], "title": r["title"] or "", "url": r["url"],
+         "thumbnail_url": r["thumbnail_url"] or _auto_thumbnail(r["url"]) or "",
+         "artist_name": r["artist_name"] or "", "tags": r["tags"] or "",
+         "created_at": r["created_at"].isoformat() if r["created_at"] else ""}
+        for r in rows
+    ]})
+
+
+async def api_user_stats(request: web.Request) -> web.Response:
+    """POST /miniapp/user_stats — user activity stats"""
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    params  = dict(urllib.parse.parse_qsl(user_data["init_data"]))
+    user_id = None
+    if 'user' in params:
+        user_id = json.loads(params['user']).get('id')
+    if not user_id:
+        return web.json_response({"stats": {}})
+
+    from sqlalchemy import text as _t
+    async with async_session() as session:
+        follows   = (await session.execute(_t("SELECT COUNT(*) FROM artist_follows WHERE telegram_id=:uid"),   {"uid": user_id})).scalar() or 0
+        favorites = (await session.execute(_t("SELECT COUNT(*) FROM favorites WHERE telegram_id=:uid"),         {"uid": user_id})).scalar() or 0
+        reactions = (await session.execute(_t("SELECT COUNT(*) FROM video_reactions WHERE telegram_id=:uid"),   {"uid": user_id})).scalar() or 0
+        comments  = (await session.execute(_t("SELECT COUNT(*) FROM video_comments WHERE telegram_id=:uid"),    {"uid": user_id})).scalar() or 0
+        user_row  = (await session.execute(_t("SELECT created_at FROM users WHERE telegram_id=:uid"),           {"uid": user_id})).mappings().one_or_none()
+        # Top artist from follows
+        top_artist_row = (await session.execute(_t(
+            "SELECT artist_name FROM artist_follows WHERE telegram_id=:uid ORDER BY created_at ASC LIMIT 1"
+        ), {"uid": user_id})).scalar_one_or_none()
+    member_since = user_row["created_at"].strftime("%b %Y") if user_row and user_row["created_at"] else ""
+    return web.json_response({"stats": {
+        "follows": int(follows), "favorites": int(favorites),
+        "reactions": int(reactions), "comments": int(comments),
+        "top_artist": top_artist_row or "",
+        "member_since": member_since,
+    }})
+
+
 async def api_get_tags(request: web.Request) -> web.Response:
     """GET /miniapp/tags — все теги с цветами"""
     async with async_session() as session:
@@ -1270,6 +1410,10 @@ def create_app() -> web.Application:
     app.router.add_post("/miniapp/watch_progress", api_watch_progress)
     app.router.add_post("/miniapp/continue_watching", api_continue_watching)
     app.router.add_get("/miniapp/search", api_search)
+    app.router.add_post("/miniapp/follow", api_toggle_follow)
+    app.router.add_post("/miniapp/follows", api_get_follows)
+    app.router.add_post("/miniapp/followed_feed", api_followed_feed)
+    app.router.add_post("/miniapp/user_stats", api_user_stats)
     app.router.add_get("/miniapp/shorts", api_get_shorts)
     app.router.add_get("/miniapp/tags", api_get_tags)
     app.router.add_get("/miniapp/video/{id}/reactions", api_get_video_reactions)

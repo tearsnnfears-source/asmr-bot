@@ -254,6 +254,8 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_crypto_checkouts_user ON crypto_checkouts (telegram_id)",
             "CREATE TABLE IF NOT EXISTS watch_history (id SERIAL PRIMARY KEY, telegram_id BIGINT, content_id INTEGER, progress_seconds INTEGER DEFAULT 0, duration_seconds INTEGER DEFAULT 0, updated_at TIMESTAMP DEFAULT NOW(), UNIQUE(telegram_id, content_id))",
             "CREATE INDEX IF NOT EXISTS idx_watch_history_user ON watch_history (telegram_id, updated_at DESC)",
+            "CREATE TABLE IF NOT EXISTS artist_follows (id SERIAL PRIMARY KEY, telegram_id BIGINT, artist_name VARCHAR(128), created_at TIMESTAMP DEFAULT NOW(), UNIQUE(telegram_id, artist_name))",
+            "CREATE INDEX IF NOT EXISTS idx_artist_follows_user ON artist_follows (telegram_id)",
             "INSERT INTO custom_badges (name, color) VALUES ('PLUS', '#FF7EC8') ON CONFLICT (name) DO NOTHING",
             "INSERT INTO custom_badges (name, color) VALUES ('PRO', '#00E5FF') ON CONFLICT (name) DO NOTHING",
             "INSERT INTO custom_badges (name, color) VALUES ('ELITE', '#FFD700') ON CONFLICT (name) DO NOTHING",

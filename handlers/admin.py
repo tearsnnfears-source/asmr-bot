@@ -193,8 +193,8 @@ async def cmd_admin_help(message: Message):
         "   plus — стандарт (€6), pro — расширенный (€8), elite — скоро\n\n"
         "🎨 <b>Артисты и контент:</b>\n"
         "/set_cont — управление артистами\n"
-        "/add_ready_on [имя] — показать READY бейдж (выше всех)\n"
-        "/add_ready_off [имя] — убрать READY бейдж\n"
+        "/artist_ready_on [имя] — показать READY бейдж (выше всех)\n"
+        "/artist_ready_off [имя] — убрать READY бейдж\n"
         "/add_cont [имя] — добавить видео/фото артисту\n"
         "/list_cont [имя] — просмотреть контент артиста\n"
         "/clear_cont [имя] videos|photos|all — очистить контент\n\n"
@@ -880,15 +880,15 @@ async def cmd_del_tag(message: Message, session: AsyncSession):
         await message.reply(f"❌ Тег <b>{name}</b> не найден.", parse_mode="HTML")
 
 
-# ─── /add_ready_on / /add_ready_off ─────────────────────────────────────────
+# ─── /artist_ready_on / /artist_ready_off (+ aliases add_ready_on/off) ───────
 
-@router.message(Command("add_ready_on"))
+@router.message(Command("artist_ready_on", "add_ready_on"))
 async def cmd_add_ready_on(message: Message, session: AsyncSession):
     if not is_admin(message.from_user.id):
         return
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.reply("Использование: /add_ready_on [имя артиста]")
+        await message.reply("Использование: /artist_ready_on [имя артиста]")
         return
     artist = await set_artist_tag(session, args[1].strip(), 'ready', True)
     if not artist:
@@ -897,13 +897,13 @@ async def cmd_add_ready_on(message: Message, session: AsyncSession):
     await message.reply(f"✅ <b>READY</b> включён для <b>{artist.name}</b>", parse_mode="HTML")
 
 
-@router.message(Command("add_ready_off"))
+@router.message(Command("artist_ready_off", "add_ready_off"))
 async def cmd_add_ready_off(message: Message, session: AsyncSession):
     if not is_admin(message.from_user.id):
         return
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.reply("Использование: /add_ready_off [имя артиста]")
+        await message.reply("Использование: /artist_ready_off [имя артиста]")
         return
     artist = await set_artist_tag(session, args[1].strip(), 'ready', False)
     if not artist:
@@ -945,8 +945,8 @@ async def cmd_set_cont(message: Message):
         "/artist_new_off [имя] — убрать тег NEW\n"
         "/artist_prom_on [имя] — добавить на главную\n"
         "/artist_prom_off [имя] — убрать с главной\n"
-        "/add_ready_on [имя] — бейдж READY (зелёный, выше всех в лентах)\n"
-        "/add_ready_off [имя] — убрать READY бейдж"
+        "/artist_ready_on [имя] — бейдж READY (зелёный, выше всех в лентах)\n"
+        "/artist_ready_off [имя] — убрать READY бейдж"
     )
 
 

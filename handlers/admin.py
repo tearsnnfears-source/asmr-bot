@@ -421,7 +421,7 @@ async def cmd_active_users(message: Message, session: AsyncSession):
         return
 
     result = await session.execute(
-        select(User).where(User.units > 0).order_by(User.units.desc())
+        select(User).where(User.units > -8).order_by(User.units.desc())
     )
     users = result.scalars().all()
 
@@ -437,7 +437,14 @@ async def cmd_active_users(message: Message, session: AsyncSession):
         trial_icon = "🎁" if u.trial_used else ""
         raw_badges = _parse_badges(getattr(u, 'badge', None))
         badge_icon = " [" + ",".join(raw_badges) + "]" if raw_badges else ""
-        lines.append(f"✅ {nick} | <code>{u.telegram_id}</code> | {u.units}д | {method}{badge_icon} {trial_icon}")
+        if u.units > 0:
+            status = "✅"
+            days_str = f"{u.units}д"
+        else:
+            grace_rem = 7 - abs(u.units)
+            status = "⏳"
+            days_str = f"Grace {grace_rem}д"
+        lines.append(f"{status} {nick} | <code>{u.telegram_id}</code> | {days_str} | {method}{badge_icon} {trial_icon}")
 
     header = (
         f"✅ <b>Активные пользователи: {len(users)}</b>\n"
@@ -937,7 +944,9 @@ async def cmd_set_cont(message: Message):
         "/artist_new_on [имя] — добавить тег NEW\n"
         "/artist_new_off [имя] — убрать тег NEW\n"
         "/artist_prom_on [имя] — добавить на главную\n"
-        "/artist_prom_off [имя] — убрать с главной"
+        "/artist_prom_off [имя] — убрать с главной\n"
+        "/add_ready_on [имя] — бейдж READY (зелёный, выше всех в лентах)\n"
+        "/add_ready_off [имя] — убрать READY бейдж"
     )
 
 

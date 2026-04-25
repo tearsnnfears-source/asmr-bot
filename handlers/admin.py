@@ -174,7 +174,8 @@ async def cmd_admin_help(message: Message):
         "/set_units [user_id] [дней] — установить дни\n"
         "/check_user [user_id] — проверить пользователя\n"
         "/allusers — список всех пользователей\n"
-        "/activeusers — только с активной подпиской (units > 0)\n\n"
+        "/activeusers — только с активной подпиской (units > 0)\n"
+        "/analytics — статистика: конверсия, тиры, топ артисты, теги\n\n"
         "🏅 <b>Бейджи (накапливаются!):</b>\n"
         "/badges — список всех бейджей\n"
         "/create_badge \"NAME\" | #HEX — создать кастомный бейдж\n"
@@ -456,6 +457,81 @@ async def cmd_active_users(message: Message, session: AsyncSession):
         chunk = lines[i:i + chunk_size]
         text = (header if i == 0 else "") + "\n".join(chunk)
         await message.answer(text, parse_mode="HTML")
+
+
+# ─── /analytics ──────────────────────────────────────────────────────────────
+
+@router.message(Command("analytics"))
+async def cmd_analytics(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+
+    from sqlalchemy import text as _t, func
+
+    # Total users
+    total_users   = (await session.execute(_t("SELECT COUNT(*) FROM users"))).scalar() or 0
+    active_users  = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE units > 0"))).scalar() or 0
+    grace_users   = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE units BETWEEN -7 AND 0 AND is_active = TRUE"))).scalar() or 0
+    trial_users   = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE trial_used = TRUE"))).scalar() or 0
+
+    # Conversion: trial → paid (has trial AND has ever paid)
+    converted = (await session.execute(_t(
+        "SELECT COUNT(*) FROM users WHERE trial_used = TRUE AND last_payment_method IS NOT NULL"
+    ))).scalar() or 0
+    conversion_pct = round(converted / trial_users * 100, 1) if trial_users else 0
+
+    # Payment methods breakdown
+    stars_count   = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE last_payment_method = 'stars' AND units > 0"))).scalar() or 0
+    tribute_count = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE last_payment_method = 'tribute' AND units > 0"))).scalar() or 0
+
+    # Tier breakdown
+    plus_count  = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE tier = 'plus'  AND units > 0"))).scalar() or 0
+    pro_count   = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE tier = 'pro'   AND units > 0"))).scalar() or 0
+    elite_count = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE tier = 'elite' AND units > 0"))).scalar() or 0
+
+    # Top followed artists
+    top_artists_rows = (await session.execute(_t(
+        "SELECT artist_name, COUNT(*) as cnt FROM artist_follows GROUP BY artist_name ORDER BY cnt DESC LIMIT 5"
+    ))).all()
+
+    # New users this week / month
+    week_new  = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '7 days'"))).scalar() or 0
+    month_new = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL '30 days'"))).scalar() or 0
+
+    # Popular tags in content
+    tag_rows = (await session.execute(_t(
+        "SELECT tags FROM artist_content WHERE content_type = 'video' AND tags IS NOT NULL AND tags != ''"
+    ))).scalars().all()
+    tag_counts: dict = {}
+    for tags_str in tag_rows:
+        for t in tags_str.split(','):
+            t = t.strip()
+            if t:
+                tag_counts[t] = tag_counts.get(t, 0) + 1
+    top_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+
+    top_artists_str = "\n".join(
+        f"  {i+1}. {r[0]} — {r[1]} followers" for i, r in enumerate(top_artists_rows)
+    ) or "  нет данных"
+    top_tags_str = "  " + " · ".join(f"{t} ({c})" for t, c in top_tags) if top_tags else "  нет данных"
+
+    text = (
+        "📊 <b>Аналитика</b>\n\n"
+        "👥 <b>Пользователи:</b>\n"
+        f"  Всего: <b>{total_users}</b> | Активных: <b>{active_users}</b> | Grace: <b>{grace_users}</b>\n"
+        f"  Новых за неделю: <b>{week_new}</b> | за месяц: <b>{month_new}</b>\n\n"
+        "🎁 <b>Конверсия триал → платный:</b>\n"
+        f"  Триалов: <b>{trial_users}</b> | Оплатили: <b>{converted}</b> | <b>{conversion_pct}%</b>\n\n"
+        "💎 <b>Тиры активных:</b>\n"
+        f"  PLUS: <b>{plus_count}</b> | PRO: <b>{pro_count}</b> | ELITE: <b>{elite_count}</b>\n\n"
+        "💳 <b>Методы оплаты (активные):</b>\n"
+        f"  ⭐ Stars: <b>{stars_count}</b> | 💳 Tribute: <b>{tribute_count}</b>\n\n"
+        "🎙 <b>Топ артистов по фолловерам:</b>\n"
+        f"{top_artists_str}\n\n"
+        "🏷 <b>Популярные теги:</b>\n"
+        f"{top_tags_str}"
+    )
+    await message.reply(text, parse_mode="HTML")
 
 
     # ─── /remove_units <user_id> <дней> ──────────────────────────────────────────

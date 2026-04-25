@@ -519,7 +519,7 @@ async def api_get_artist_content(request: web.Request) -> web.Response:
     offset      = max(0, int(q.get("offset", 0)))
     tag_filter  = q.get("tag", "").strip()
 
-    LIMITS = {"video": 10, "short": 10, "photo": 25}
+    LIMITS = {"video": 10, "short": 9, "photo": 24}
 
     if not artist_name:
         return web.json_response({"error": "name required"}, status=400)

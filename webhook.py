@@ -3,10 +3,12 @@ import hmac
 import logging
 import json
 import urllib.parse
+import uuid as _uuid_mod
+from datetime import datetime as _dt, timedelta, timezone
 from aiohttp import ClientSession, ClientTimeout, web
 from aiogram import Bot
 from aiogram.types import LabeledPrice
-from sqlalchemy import select
+from sqlalchemy import select, text as sa_text, func as sa_func
 
 from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, assign_tier_badge, _auto_thumbnail
 from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_TIER_MAP, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_WALLET_USDT_TRC20, CRYPTO_WALLET_USDT_TON, CRYPTO_WALLET_ETH, CRYPTO_USDT_PRICES
@@ -148,7 +150,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                 link_obj = await bot.create_chat_invite_link(
                     GROUP_ID,
                     member_limit=1,
-                    expire_date=int((__import__('datetime').datetime.utcnow() + timedelta(hours=72)).timestamp()),
+                    expire_date=int((_dt.utcnow() + timedelta(hours=72)).timestamp()),
                 )
                 invite_link = link_obj.invite_link
                 async with async_session() as inv_session:
@@ -610,14 +612,12 @@ async def api_crypto_checkout(request: web.Request) -> web.Response:
     wallet_addr, network, symbol = wallets[currency]
     amount = CRYPTO_USDT_PRICES.get(tier, 6)
 
-    import uuid as _uuid
-    from datetime import timedelta, datetime as _dt
-    order_uuid = f"crypto_{_uuid.uuid4().hex[:16]}"
-    expires_at = _dt.now(__import__('datetime').timezone.utc).replace(tzinfo=None) + timedelta(hours=24)
+    order_uuid = f"crypto_{_uuid_mod.uuid4().hex[:16]}"
+    expires_at = _dt.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=24)
 
     async with async_session() as session:
         await session.execute(
-            __import__('sqlalchemy').text(
+            sa_text(
                 "INSERT INTO crypto_checkouts (order_uuid, telegram_id, tier, crypto_amount, crypto_currency, network, wallet_address, expires_at) "
                 "VALUES (:uuid, :tid, :tier, :amount, :currency, :network, :wallet, :exp)"
             ),
@@ -706,7 +706,7 @@ async def api_get_shorts(request: web.Request) -> web.Response:
             result = await session.execute(
                 select(ArtistContent)
                 .where(ArtistContent.content_type == "short")
-                .order_by(__import__('sqlalchemy').func.random())
+                .order_by(sa_func.random())
                 .limit(limit)
             )
             shorts = result.scalars().all()

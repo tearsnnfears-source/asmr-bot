@@ -4,7 +4,9 @@
       "Bash(xargs wc *)",
       "Bash(grep -v \"^\\\\s*//\")",
       "Bash(grep -v \"Carousel\\\\|carousel\\\\|#\\\\|//\")",
-      "Bash(grep -n \"break;\\\\s*$\" \"C:\\\\Users\\\\dimar\\\\Desktop\\\\asmr-miniapp\\\\index.html.html\")"
+      "Bash(grep -n \"break;\\\\s*$\" \"C:\\\\Users\\\\dimar\\\\Desktop\\\\asmr-miniapp\\\\index.html.html\")",
+      "Bash(node --input-type=module)",
+      "Bash(powershell -Command ' *)"
     ]
   }
 }

@@ -126,10 +126,11 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
             logger.warning(f"Unknown Stars payload format: {payload}")
             return
 
-        # Начисляем подписку
+        # Начисляем подписку (Stars — без grace debt, стартуем от 0 если был в минусе)
         user = await get_or_create_user(session, user_id)
         lang = user.lang or "en"
-        user.units += days
+        base = max(0, user.units)  # Stars не наследуют grace debt
+        user.units = base + days
         user.is_active = True
         user.last_payment_method = "stars"
         await session.commit()

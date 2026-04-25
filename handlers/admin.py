@@ -191,6 +191,7 @@ async def cmd_admin_help(message: Message):
         "/set_tier [user_id] [plus|pro|elite|free] — установить тир\n"
         "/users_tiers — активные юзеры с тирами и днями\n"
         "/sync_tier_badges — выдать бейджи PLUS/PRO/ELITE всем по тиру\n"
+        "/fix_grace — убрать grace у не-tribute пользователей (одноразово)\n"
         "   plus — стандарт (€6), pro — расширенный (€8), elite — скоро\n\n"
         "🎨 <b>Артисты и контент:</b>\n"
         "/set_cont — управление артистами\n"
@@ -421,8 +422,14 @@ async def cmd_active_users(message: Message, session: AsyncSession):
     if not is_admin(message.from_user.id):
         return
 
+    from sqlalchemy import or_, and_
     result = await session.execute(
-        select(User).where(User.units > -8).order_by(User.units.desc())
+        select(User).where(
+            or_(
+                User.units > 0,  # active subscribers
+                and_(User.units < 0, User.last_payment_method == 'tribute', User.is_active == True)  # tribute grace only
+            )
+        ).order_by(User.units.desc())
     )
     users = result.scalars().all()
 
@@ -433,7 +440,7 @@ async def cmd_active_users(message: Message, session: AsyncSession):
     lines = []
     for u in users:
         nick = f"@{u.username}" if u.username else f"id{u.telegram_id}"
-        method_labels = {"stars": "⭐", "tribute": "💳"}
+        method_labels = {"stars": "⭐", "tribute": "💳", "crypto": "₿"}
         method = method_labels.get(u.last_payment_method, u.last_payment_method or "—")
         trial_icon = "🎁" if u.trial_used else ""
         raw_badges = _parse_badges(getattr(u, 'badge', None))
@@ -442,6 +449,7 @@ async def cmd_active_users(message: Message, session: AsyncSession):
             status = "✅"
             days_str = f"{u.units}д"
         else:
+            # units < 0, tribute grace
             grace_rem = 7 - abs(u.units)
             status = "⏳"
             days_str = f"Grace {grace_rem}д"
@@ -842,6 +850,33 @@ async def cmd_confirm_crypto(message: Message, session: AsyncSession, bot: Bot):
         pass
 
     await message.reply(f"✅ Заказ <code>{order_uuid}</code> подтверждён, пользователю выдано 31 день.", parse_mode="HTML")
+
+
+# ─── /fix_grace — одноразовая очистка неправильного grace period ─────────────
+
+@router.message(Command("fix_grace"))
+async def cmd_fix_grace(message: Message, session: AsyncSession):
+    """Убрать отрицательные units у всех не-tribute пользователей (Stars/Crypto/Trial)."""
+    if not is_admin(message.from_user.id):
+        return
+    from sqlalchemy import text as _t
+    # 1. Сбросить units = 0 у тех кто не tribute, но units < 0
+    r1 = await session.execute(_t(
+        "UPDATE users SET units = 0, is_active = FALSE WHERE units < 0 AND (last_payment_method IS NULL OR last_payment_method != 'tribute') RETURNING telegram_id"
+    ))
+    fixed_negative = len(r1.fetchall())
+    # 2. Сбросить units = 0 у тех кто tribute но is_active = FALSE и units < 0 (уже кикнутые)
+    r2 = await session.execute(_t(
+        "UPDATE users SET units = 0 WHERE units < 0 AND last_payment_method = 'tribute' AND is_active = FALSE RETURNING telegram_id"
+    ))
+    fixed_inactive = len(r2.fetchall())
+    await session.commit()
+    await message.reply(
+        f"✅ <b>Grace period очищен:</b>\n"
+        f"Не-tribute с units&lt;0: <b>{fixed_negative}</b> сброшено\n"
+        f"Tribute неактивных: <b>{fixed_inactive}</b> сброшено",
+        parse_mode="HTML"
+    )
 
 
 # ─── /sync_tier_badges ───────────────────────────────────────────────────────

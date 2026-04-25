@@ -510,33 +510,74 @@ async def api_get_custom_badges(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_get_artist_content(request: web.Request) -> web.Response:
-    """GET /miniapp/artist_content?name=ArtistName"""
-    artist_name = request.rel_url.query.get("name", "").strip()
+    """GET /miniapp/artist_content?name=X&type=video|photo|short&offset=0&limit=10&tag=TAG
+    Without type param: returns first page of all three types (initial load).
+    With type param: returns paginated list of that type."""
+    q           = request.rel_url.query
+    artist_name = q.get("name", "").strip()
+    content_type= q.get("type", "").strip()      # video | photo | short | "" (all)
+    offset      = max(0, int(q.get("offset", 0)))
+    tag_filter  = q.get("tag", "").strip()
+
+    LIMITS = {"video": 10, "short": 10, "photo": 25}
+
     if not artist_name:
         return web.json_response({"error": "name required"}, status=400)
+
+    from sqlalchemy import select, and_
     async with async_session() as session:
-        videos = await get_artist_content(session, artist_name, "video")
-        photos = await get_artist_content(session, artist_name, "photo")
-        shorts = await get_artist_content(session, artist_name, "short")
-    return web.json_response({
-        "artist": artist_name,
-        "videos": [
-            {"id": v.id, "title": v.title or "", "url": v.url,
-             "thumbnail_url": v.thumbnail_url or _auto_thumbnail(v.url) or "",
-             "tags": v.tags or "", "sort_order": v.sort_order}
-            for v in videos
-        ],
-        "photos": [
-            {"id": p.id, "url": p.url, "sort_order": p.sort_order}
-            for p in photos
-        ],
-        "shorts": [
-            {"id": s.id, "title": s.title or "", "url": s.url,
-             "thumbnail_url": s.thumbnail_url or _auto_thumbnail(s.url) or "",
-             "tags": s.tags or "", "sort_order": s.sort_order}
-            for s in shorts
-        ],
-    })
+
+        async def _fetch(ctype: str, lim: int, off: int, tag: str = ""):
+            q2 = select(ArtistContent).where(
+                and_(ArtistContent.artist_name == artist_name,
+                     ArtistContent.content_type == ctype)
+            )
+            if tag:
+                q2 = q2.where(ArtistContent.tags.ilike(f"%{tag}%"))
+            q2 = q2.order_by(ArtistContent.sort_order, ArtistContent.created_at.desc())
+            # Fetch lim+1 to know if there are more
+            q2 = q2.offset(off).limit(lim + 1)
+            result = await session.execute(q2)
+            rows = list(result.scalars().all())
+            has_more = len(rows) > lim
+            return rows[:lim], has_more
+
+        if content_type in ("video", "short", "photo"):
+            # Paginated single-type request
+            lim  = LIMITS.get(content_type, 10)
+            rows, has_more = await _fetch(content_type, lim, offset, tag_filter)
+
+            def _fmt_item(v):
+                base = {"id": v.id, "title": v.title or "", "url": v.url,
+                        "thumbnail_url": v.thumbnail_url or _auto_thumbnail(v.url) or "",
+                        "tags": v.tags or "", "sort_order": v.sort_order}
+                if content_type == "photo":
+                    return {"id": v.id, "url": v.url, "sort_order": v.sort_order}
+                return base
+
+            return web.json_response({
+                "type": content_type, "offset": offset,
+                "has_more": has_more, "items": [_fmt_item(v) for v in rows]
+            })
+
+        else:
+            # Initial load — first page of all three
+            videos, v_more = await _fetch("video", LIMITS["video"], 0)
+            photos, p_more = await _fetch("photo", LIMITS["photo"], 0)
+            shorts, s_more = await _fetch("short", LIMITS["short"], 0)
+            return web.json_response({
+                "artist": artist_name,
+                "videos": [{"id": v.id, "title": v.title or "", "url": v.url,
+                             "thumbnail_url": v.thumbnail_url or _auto_thumbnail(v.url) or "",
+                             "tags": v.tags or "", "sort_order": v.sort_order} for v in videos],
+                "videos_more": v_more,
+                "photos": [{"id": p.id, "url": p.url, "sort_order": p.sort_order} for p in photos],
+                "photos_more": p_more,
+                "shorts": [{"id": s.id, "title": s.title or "", "url": s.url,
+                             "thumbnail_url": s.thumbnail_url or _auto_thumbnail(s.url) or "",
+                             "tags": s.tags or "", "sort_order": s.sort_order} for s in shorts],
+                "shorts_more": s_more,
+            })
 
 
 async def api_crypto_checkout(request: web.Request) -> web.Response:

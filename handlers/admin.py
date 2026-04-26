@@ -188,6 +188,7 @@ async def cmd_admin_help(message: Message):
         "/nightmode_on — включить ночной режим\n"
         "/nightmode_off — выключить ночной режим\n\n"
         "💎 <b>Тиры подписки:</b>\n"
+        "/set_pm [user_id] [tribute|stars|crypto] — установить метод оплаты\n"
         "/set_tier [user_id] [plus|pro|elite|free] — установить тир\n"
         "/users_tiers — активные юзеры с тирами и днями\n"
         "/sync_tier_badges — выдать бейджи PLUS/PRO/ELITE всем по тиру\n"
@@ -764,6 +765,32 @@ async def cmd_remove_badge(message: Message, session: AsyncSession):
 # ─── /set_tier ───────────────────────────────────────────────────────────────
 
 VALID_TIERS = {"plus", "pro", "elite", "free"}
+VALID_PM    = {"tribute", "stars", "crypto"}
+
+@router.message(Command("set_pm"))
+async def cmd_set_pm(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+    args = message.text.split()[1:]
+    if len(args) != 2 or not args[0].isdigit():
+        await message.reply("Использование: /set_pm [user_id] [tribute|stars|crypto]")
+        return
+    pm = args[1].lower()
+    if pm not in VALID_PM:
+        await message.reply(f"❌ Неверный метод. Доступные: {', '.join(VALID_PM)}")
+        return
+    user = await get_user(session, int(args[0]))
+    if not user:
+        await message.reply(f"❌ Пользователь {args[0]} не найден.")
+        return
+    user.last_payment_method = pm
+    await session.commit()
+    nick = f"@{user.username}" if user.username else f"id{user.telegram_id}"
+    await message.reply(
+        f"✅ Метод оплаты пользователя {nick} установлен: <b>{pm}</b>",
+        parse_mode="HTML"
+    )
+
 
 @router.message(Command("set_tier"))
 async def cmd_set_tier(message: Message, session: AsyncSession):

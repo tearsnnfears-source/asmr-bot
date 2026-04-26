@@ -11,7 +11,7 @@ from aiogram.types import LabeledPrice
 from sqlalchemy import select, text as sa_text, func as sa_func
 
 from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, assign_tier_badge, _auto_thumbnail
-from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_TIER_MAP, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_WALLET_USDT_TRC20, CRYPTO_WALLET_USDT_TON, CRYPTO_WALLET_ETH, CRYPTO_USDT_PRICES
+from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_WALLET_USDT_TRC20, CRYPTO_WALLET_USDT_TON, CRYPTO_WALLET_ETH, CRYPTO_USDT_PRICES
 
 logger = logging.getLogger(__name__)
 
@@ -91,20 +91,20 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             result = await session.execute(select(User).where(User.telegram_id == telegram_id))
             user = result.scalar_one_or_none()
 
-            # Determine tier from startapp code (explicit), fallback to amount
-            raw = json.dumps(payload)
-            new_tier = 'plus'
-            for code, tier in TRIBUTE_TIER_MAP.items():
-                if code in raw:
-                    new_tier = tier
-                    break
+            # Determine tier by amount (most reliable — startapp substring matching was error-prone)
+            try:
+                amount_eur = float(payload.get("amount", 0) or payload.get("price", 0) or 0)
+            except Exception:
+                amount_eur = 0
+
+            if amount_eur >= 8.5:
+                new_tier = 'elite'
+            elif amount_eur >= 7.0:
+                new_tier = 'pro'
             else:
-                try:
-                    amount_eur = float(payload.get("amount", 0) or payload.get("price", 0) or 0)
-                except Exception:
-                    amount_eur = 0
-                if amount_eur >= 8:
-                    new_tier = 'pro'
+                new_tier = 'plus'
+
+            logger.info(f"Tribute payment: {amount_eur}€ → tier={new_tier}")
 
             TRIBUTE_DAYS = 31
             if not user:

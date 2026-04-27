@@ -22,29 +22,6 @@ async def cb_cabinet(call: CallbackQuery, session: AsyncSession, bot: Bot):
     except Exception:
         pass
     await _show_profile(call.message, user)
-    return
-
-    # Legacy code kept below (unreachable, safe to remove later)
-    lang = user.lang or "en"
-    username = user.username or "—"
-
-    if user.units > 0:
-        days_text = t("days_left", lang, n=user.units)
-    else:
-        days_text = t("no_subscription", lang)
-
-    text = t("cabinet", lang,
-             telegram_id=user.telegram_id,
-             username=username,
-             days=days_text)
-
-    await bot.send_photo(
-        chat_id=call.from_user.id,
-        photo=CABINET_IMAGE,
-        caption=text,
-        reply_markup=kb_cabinet(lang, has_sub=user.units > 0, trial_used=user.trial_used),
-        parse_mode="HTML",
-    )
 
 
 @router.callback_query(F.data == "subscribe")

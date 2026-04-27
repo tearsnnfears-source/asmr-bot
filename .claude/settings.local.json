@@ -6,7 +6,9 @@
       "Bash(grep -v \"Carousel\\\\|carousel\\\\|#\\\\|//\")",
       "Bash(grep -n \"break;\\\\s*$\" \"C:\\\\Users\\\\dimar\\\\Desktop\\\\asmr-miniapp\\\\index.html.html\")",
       "Bash(node --input-type=module)",
-      "Bash(powershell -Command ' *)"
+      "Bash(powershell -Command ' *)",
+      "PowerShell(python -c \"import ast; ast.parse\\(open\\('C:/Users/dimar/Desktop/asmr_bot_v15/handlers/start.py'\\).read\\(\\)\\); print\\('start.py OK'\\)\")",
+      "PowerShell(python -c \"import ast; ast.parse\\(open\\('C:/Users/dimar/Desktop/asmr_bot_v15/handlers/cabinet.py'\\).read\\(\\)\\); print\\('cabinet.py OK'\\)\")"
     ]
   }
 }

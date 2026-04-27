@@ -44,6 +44,11 @@ STARS_TIER_PRICES = {
     'free':  500,
 }
 
+# Bot links
+MINIAPP_URL   = os.getenv("MINIAPP_URL", "https://t.me/asmrleaksbot/app")
+FREE_PAGES    = os.getenv("FREE_PAGES",  "")   # comma-separated: Name|URL,Name|URL
+SUPPORT_URL   = os.getenv("SUPPORT_URL", "https://t.me/sonnnnnua")
+
 # Ночной режим (МСК)
 NIGHT_START = 23
 NIGHT_END   = 8

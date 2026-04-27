@@ -14,7 +14,17 @@ CABINET_IMAGE = "AgACAgIAAxkBAAIBHGm7cIqXo0APoaonaqGKih11w2S7AAJwEmsbcLjgSfSON7D
 
 @router.callback_query(F.data == "cabinet")
 async def cb_cabinet(call: CallbackQuery, session: AsyncSession, bot: Bot):
+    from handlers.start import _show_profile
     user = await get_or_create_user(session, call.from_user.id)
+    await call.answer()
+    try:
+        await call.message.delete()
+    except Exception:
+        pass
+    await _show_profile(call.message, user)
+    return
+
+    # Legacy code kept below (unreachable, safe to remove later)
     lang = user.lang or "en"
     username = user.username or "—"
 
@@ -27,12 +37,6 @@ async def cb_cabinet(call: CallbackQuery, session: AsyncSession, bot: Bot):
              telegram_id=user.telegram_id,
              username=username,
              days=days_text)
-
-    await call.answer()
-    try:
-        await call.message.delete()
-    except Exception:
-        pass
 
     await bot.send_photo(
         chat_id=call.from_user.id,

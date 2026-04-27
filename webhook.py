@@ -159,17 +159,26 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             logger.error(f"Failed to create invite link for {telegram_id}: {e}")
 
         try:
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
             if lang == "ru":
                 text = (f"✅ <b>Оплата через Tribute прошла успешно!</b>\n\n"
                         f"📅 Добавлено: <b>31 день</b>\n"
                         f"📅 Итого: <b>{total} дней</b>\n\n"
-                        f"🔗 Вернитесь в мини-апп — там вас ждёт ссылка для вступления.")
+                        f"👇 Нажми кнопку ниже чтобы вступить в группу.\n"
+                        f"<i>Ссылка одноразовая — после вступления истекает.</i>")
             else:
                 text = (f"✅ <b>Tribute payment successful!</b>\n\n"
                         f"📅 Added: <b>31 days</b>\n"
                         f"📅 Total: <b>{total} days</b>\n\n"
-                        f"🔗 Return to the mini-app — your join link is waiting there.")
-            await bot.send_message(telegram_id, text, parse_mode="HTML")
+                        f"👇 Tap the button below to join the group.\n"
+                        f"<i>One-time link — expires after use.</i>")
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="🔗 Вступить в группу" if lang == "ru" else "🔗 Join the group",
+                    url=invite_link
+                )
+            ]])
+            await bot.send_message(telegram_id, text, parse_mode="HTML", reply_markup=kb)
         except Exception as e:
             logger.error(f"Cannot notify user {telegram_id}: {e}")
         finally:

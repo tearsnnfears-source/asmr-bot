@@ -165,14 +165,16 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
                 f"🌟 <b>Оплата Звёздами прошла успешно!</b>\n\n"
                 f"📅 Добавлено: <b>{days} дней</b>\n"
                 f"📅 Итого: <b>{user.units} дней</b>\n\n"
-                f"🔗 Вернитесь в мини-апп — там вас ждёт ссылка для вступления."
+                f"👇 Нажми кнопку ниже чтобы вступить в группу.\n"
+                f"<i>Ссылка одноразовая — после вступления истекает.</i>"
             )
         else:
             text = (
                 f"🌟 <b>Stars payment successful!</b>\n\n"
                 f"📅 Added: <b>{days} days</b>\n"
                 f"📅 Total: <b>{user.units} days</b>\n\n"
-                f"🔗 Return to the mini-app — your join link is waiting there."
+                f"👇 Tap the button below to join the group.\n"
+                f"<i>One-time link — expires after use.</i>"
             )
 
         from keyboards.inline import kb_after_payment

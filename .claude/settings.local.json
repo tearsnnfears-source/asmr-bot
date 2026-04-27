@@ -9,7 +9,10 @@
       "Bash(powershell -Command ' *)",
       "PowerShell(python -c \"import ast; ast.parse\\(open\\('C:/Users/dimar/Desktop/asmr_bot_v15/handlers/start.py'\\).read\\(\\)\\); print\\('start.py OK'\\)\")",
       "PowerShell(python -c \"import ast; ast.parse\\(open\\('C:/Users/dimar/Desktop/asmr_bot_v15/handlers/cabinet.py'\\).read\\(\\)\\); print\\('cabinet.py OK'\\)\")",
-      "PowerShell(python -c \"import ast; ast.parse\\(open\\('C:/Users/dimar/Desktop/asmr_bot_v15/handlers/start.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "PowerShell(python -c \"import ast; ast.parse\\(open\\('C:/Users/dimar/Desktop/asmr_bot_v15/handlers/start.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import aiogram; print\\(aiogram.__version__\\)\")",
+      "Bash(python -c \"from aiogram.types import InlineKeyboardButton; import inspect; print\\([f for f in inspect.signature\\(InlineKeyboardButton.__init__\\).parameters]\\)\")",
+      "Bash(python -c \"from aiogram.types import InlineKeyboardButton; b = InlineKeyboardButton.__fields__ if hasattr\\(InlineKeyboardButton, '__fields__'\\) else InlineKeyboardButton.model_fields; print\\(list\\(b.keys\\(\\)\\)\\)\")"
     ]
   }
 }

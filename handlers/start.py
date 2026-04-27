@@ -2,8 +2,9 @@ from aiogram import Router, F
 from aiogram.filters import CommandStart
 from aiogram.types import (
     Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton, MessageEntity,
+    InlineKeyboardMarkup, InlineKeyboardButton,
 )
+from aiogram.enums import ButtonStyle
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_or_create_user
@@ -21,36 +22,44 @@ _CE_GREEN  = "5292005513809126424"
 _CE_ORANGE = "5291936738497815159"
 _CE_BLUE   = "5291829553293978876"
 
-def _ce_btn(emoji_id: str, label: str, **kwargs) -> InlineKeyboardButton:
-    """InlineKeyboardButton с кастомным эмодзи через entities."""
-    placeholder = "⭐"  # placeholder — любой 1 символ
-    text = f"{placeholder} {label}"
-    entity = MessageEntity(
-        type="custom_emoji",
-        offset=0,
-        length=len(placeholder),
-        custom_emoji_id=emoji_id,
-    )
-    return InlineKeyboardButton(text=text, entities=[entity], **kwargs)
-
 
 # ── Keyboards ──────────────────────────────────────────────────────────────────
 
 def kb_start(lang: str, has_sub: bool, trial_used: bool) -> InlineKeyboardMarkup:
     rows = []
 
-    app_label   = "Open App"              if lang == "en" else "Открыть приложение"
-    pages_label = "Free Pages"            if lang == "en" else "Бесплатные каналы"
-    sup_label   = "Support"               if lang == "en" else "Поддержка"
-    trial_label = "Try 5 days free"       if lang == "en" else "Попробовать 5 дней бесплатно"
-    lang_label  = "🌐 Language"           if lang == "en" else "🌐 Язык"
+    app_label   = "Open App"                        if lang == "en" else "Открыть приложение"
+    pages_label = "Free Pages"                      if lang == "en" else "Бесплатные каналы"
+    sup_label   = "Support"                         if lang == "en" else "Поддержка"
+    trial_label = "Try 5 days free"                 if lang == "en" else "Попробовать 5 дней бесплатно"
+    lang_label  = "🌐 Language"                     if lang == "en" else "🌐 Язык"
 
-    rows.append([_ce_btn(_CE_GREEN,  app_label,   url=MINIAPP_URL or "https://t.me/asmrleaksbot")])
-    rows.append([_ce_btn(_CE_ORANGE, pages_label, callback_data="free_pages")])
-    rows.append([_ce_btn(_CE_BLUE,   sup_label,   url=SUPPORT_URL)])
+    # success = green, primary = blue, danger = red
+    # Для оранжевого используем primary + кастомный эмодзи (нет нативного оранжевого)
+    rows.append([InlineKeyboardButton(
+        text=app_label,
+        url=MINIAPP_URL or "https://t.me/asmrleaksbot",
+        icon_custom_emoji_id=_CE_GREEN,
+        style=ButtonStyle.SUCCESS,
+    )])
+    rows.append([InlineKeyboardButton(
+        text=pages_label,
+        callback_data="free_pages",
+        icon_custom_emoji_id=_CE_ORANGE,
+        style=ButtonStyle.PRIMARY,
+    )])
+    rows.append([InlineKeyboardButton(
+        text=sup_label,
+        url=SUPPORT_URL,
+        icon_custom_emoji_id=_CE_BLUE,
+        style=ButtonStyle.PRIMARY,
+    )])
 
     if not has_sub and not trial_used:
-        rows.append([InlineKeyboardButton(text=f"🎁 {trial_label}", callback_data="free_trial")])
+        rows.append([InlineKeyboardButton(
+            text=f"🎁 {trial_label}",
+            callback_data="free_trial",
+        )])
 
     rows.append([InlineKeyboardButton(text=lang_label, callback_data="change_language")])
 

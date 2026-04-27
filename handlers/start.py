@@ -2,7 +2,7 @@ from aiogram import Router, F
 from aiogram.filters import CommandStart
 from aiogram.types import (
     Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+    InlineKeyboardMarkup, InlineKeyboardButton,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,17 +22,11 @@ LANGUAGE_IMAGE = "AgACAgIAAxkBAAIBHGm7cIqXo0APoaonaqGKih11w2S7AAJwEmsbcLjgSfSON7
 def kb_start(lang: str, has_sub: bool, trial_used: bool) -> InlineKeyboardMarkup:
     rows = []
 
-    # 1. Open MiniApp — green
-    if MINIAPP_URL:
-        rows.append([InlineKeyboardButton(
-            text="🟢 Open App" if lang == "en" else "🟢 Открыть приложение",
-            web_app=WebAppInfo(url=MINIAPP_URL),
-        )])
-    else:
-        rows.append([InlineKeyboardButton(
-            text="🟢 Open App" if lang == "en" else "🟢 Открыть приложение",
-            url="https://t.me/asmrleaksbot",
-        )])
+    # 1. Open MiniApp — green (url opens t.me/bot/app inline)
+    rows.append([InlineKeyboardButton(
+        text="🟢 Open App" if lang == "en" else "🟢 Открыть приложение",
+        url=MINIAPP_URL or "https://t.me/asmrleaksbot",
+    )])
 
     # 2. Free Pages — orange
     rows.append([InlineKeyboardButton(

@@ -4,7 +4,12 @@ from aiogram.types import (
     Message, CallbackQuery,
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
-from aiogram.enums import ButtonStyle
+try:
+    from aiogram.enums import ButtonStyle
+    _HAS_STYLE = True
+except ImportError:
+    ButtonStyle = None
+    _HAS_STYLE = False
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_or_create_user
@@ -36,23 +41,31 @@ def kb_start(lang: str, has_sub: bool, trial_used: bool) -> InlineKeyboardMarkup
 
     # success = green, primary = blue, danger = red
     # Для оранжевого используем primary + кастомный эмодзи (нет нативного оранжевого)
-    rows.append([InlineKeyboardButton(
+    def _btn(**kwargs):
+        if _HAS_STYLE:
+            return InlineKeyboardButton(**kwargs)
+        # Fallback без style/icon для старых версий
+        kwargs.pop("style", None)
+        kwargs.pop("icon_custom_emoji_id", None)
+        return InlineKeyboardButton(**kwargs)
+
+    rows.append([_btn(
         text=app_label,
         url=MINIAPP_URL or "https://t.me/asmrleaksbot",
         icon_custom_emoji_id=_CE_GREEN,
-        style=ButtonStyle.SUCCESS,
+        style=ButtonStyle.SUCCESS if _HAS_STYLE else None,
     )])
-    rows.append([InlineKeyboardButton(
+    rows.append([_btn(
         text=pages_label,
         callback_data="free_pages",
         icon_custom_emoji_id=_CE_ORANGE,
-        style=ButtonStyle.PRIMARY,
+        style=ButtonStyle.PRIMARY if _HAS_STYLE else None,
     )])
-    rows.append([InlineKeyboardButton(
+    rows.append([_btn(
         text=sup_label,
         url=SUPPORT_URL,
         icon_custom_emoji_id=_CE_BLUE,
-        style=ButtonStyle.PRIMARY,
+        style=ButtonStyle.PRIMARY if _HAS_STYLE else None,
     )])
 
     if not has_sub and not trial_used:

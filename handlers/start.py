@@ -2,7 +2,7 @@ from aiogram import Router, F
 from aiogram.filters import CommandStart
 from aiogram.types import (
     Message, CallbackQuery,
-    InlineKeyboardMarkup, InlineKeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo,
 )
 try:
     from aiogram.enums import ButtonStyle
@@ -49,12 +49,16 @@ def kb_start(lang: str, has_sub: bool, trial_used: bool) -> InlineKeyboardMarkup
         kwargs.pop("icon_custom_emoji_id", None)
         return InlineKeyboardButton(**kwargs)
 
-    rows.append([_btn(
+    app_btn_kwargs = dict(
         text=app_label,
-        url=MINIAPP_URL or "https://t.me/asmrleaksbot",
         icon_custom_emoji_id=_CE_GREEN,
         style=ButtonStyle.SUCCESS if _HAS_STYLE else None,
-    )])
+    )
+    if MINIAPP_URL:
+        app_btn_kwargs["web_app"] = WebAppInfo(url=MINIAPP_URL)
+    else:
+        app_btn_kwargs["url"] = "https://t.me/asmrleaksbot"
+    rows.append([_btn(**app_btn_kwargs)])
     rows.append([_btn(
         text=pages_label,
         callback_data="free_pages",
@@ -65,7 +69,7 @@ def kb_start(lang: str, has_sub: bool, trial_used: bool) -> InlineKeyboardMarkup
         text=sup_label,
         url=SUPPORT_URL,
         icon_custom_emoji_id=_CE_BLUE,
-        style=ButtonStyle.PRIMARY if _HAS_STYLE else None,
+        style=ButtonStyle.DANGER if _HAS_STYLE else None,
     )])
 
     if not has_sub and not trial_used:

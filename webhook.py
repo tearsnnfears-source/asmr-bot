@@ -109,6 +109,29 @@ async def _notify_admins(text: str):
     finally:
         await bot.session.close()
 
+
+async def _create_group_invite_for_user(telegram_id: int, store_pending: bool = False) -> str:
+    """Create a one-time Telegram group invite, falling back to INVITE_LINK."""
+    invite_link = INVITE_LINK or ""
+    bot = Bot(token=BOT_TOKEN)
+    try:
+        if GROUP_ID:
+            link_obj = await bot.create_chat_invite_link(
+                GROUP_ID,
+                member_limit=1,
+                expire_date=int((_dt.utcnow() + timedelta(hours=72)).timestamp()),
+            )
+            invite_link = link_obj.invite_link
+        if store_pending and invite_link:
+            async with async_session() as session:
+                await create_pending_invite(session, telegram_id, invite_link)
+    except Exception as e:
+        logger.error(f"Failed to create invite link for {telegram_id}: {e}")
+    finally:
+        await bot.session.close()
+    return invite_link
+
+
 async def forward_tribute_webhook(body: bytes, signature: str) -> None:
     if not TRIBUTE_SITE_WEBHOOK_URL:
         return
@@ -513,36 +536,53 @@ async def api_free_trial(request: web.Request) -> web.Response:
         if not init_data:
             return web.json_response({"error": "No initData"}, status=400)
 
-        user_id = _parse_user_id(init_data)
-        if not user_id:
+        user_data = validate_telegram_init_data(init_data)
+        if not user_data:
             return web.json_response({"error": "Cannot parse user"}, status=403)
+        user_id = int(user_data["user_id"])
+        tg_user = user_data.get("user") or {}
 
         async with async_session() as session:
             result = await session.execute(select(User).where(User.telegram_id == user_id))
             user = result.scalar_one_or_none()
 
             if not user:
-                user = User(telegram_id=user_id, units=5, trial_used=True, is_active=True)
+                user = User(
+                    telegram_id=user_id,
+                    username=tg_user.get("username"),
+                    full_name=" ".join(filter(None, [tg_user.get("first_name"), tg_user.get("last_name")])) or None,
+                    units=5,
+                    trial_used=True,
+                    is_active=True,
+                )
                 session.add(user)
                 await session.commit()
                 await session.refresh(user)
             else:
                 if user.trial_used:
                     return web.json_response({"error": "Trial already used"}, status=409)
+                if tg_user.get("username"):
+                    user.username = tg_user.get("username")
+                full_name = " ".join(filter(None, [tg_user.get("first_name"), tg_user.get("last_name")]))
+                if full_name:
+                    user.full_name = full_name
                 user.units += 5
                 user.trial_used = True
                 user.is_active = True
                 await session.commit()
+                await session.refresh(user)
+
+            invite_link = await _create_group_invite_for_user(user_id, store_pending=True)
 
             # Уведомление админу
             nick = f"@{user.username}" if getattr(user, 'username', None) else f"id{user_id}"
             await _notify_admins(
                 f"🎁 <b>Новый триал (Mini App)</b>\n"
                 f"👤 {nick} | <code>{user_id}</code>\n"
-                f"📅 Активировал 3 бесплатных дня"
+                f"📅 Активировал 5 бесплатных дней"
             )
 
-            return web.json_response({"ok": True, "days_left": user.units})
+            return web.json_response({"ok": True, "days_left": user.units, "invite_link": invite_link})
     except Exception as e:
         logger.error(f"Error in api_free_trial: {e}")
         return web.json_response({"error": str(e)}, status=500)

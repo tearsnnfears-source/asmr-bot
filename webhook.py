@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import logging
 import json
+import time
 import urllib.parse
 import uuid as _uuid_mod
 from datetime import datetime as _dt, timedelta, timezone
@@ -14,6 +15,86 @@ from database import async_session, User, PendingPayment, Artist, get_all_artist
 from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_WALLET_USDT_TRC20, CRYPTO_WALLET_USDT_TON, CRYPTO_WALLET_ETH, CRYPTO_USDT_PRICES
 
 logger = logging.getLogger(__name__)
+
+INIT_DATA_MAX_AGE_SECONDS = 24 * 60 * 60
+MINIAPP_STARS_PLANS = {
+    "plus": {"days": 31, "stars": STARS_TIER_PRICES["plus"]},
+    "pro": {"days": 31, "stars": STARS_TIER_PRICES["pro"]},
+}
+
+
+def validate_telegram_init_data(init_data: str) -> dict | None:
+    """Validate Telegram Mini App initData and return trusted user data."""
+    if not init_data or not BOT_TOKEN:
+        return None
+
+    pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
+    params = dict(pairs)
+    received_hash = params.pop("hash", None)
+    if not received_hash:
+        return None
+
+    data_check_string = "\n".join(
+        f"{key}={value}" for key, value in sorted(params.items())
+    )
+    secret_key = hmac.new(
+        b"WebAppData",
+        BOT_TOKEN.encode(),
+        hashlib.sha256,
+    ).digest()
+    calculated_hash = hmac.new(
+        secret_key,
+        data_check_string.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+    if not hmac.compare_digest(calculated_hash, received_hash):
+        logger.warning("Invalid Telegram initData hash")
+        return None
+
+    try:
+        auth_date = int(params.get("auth_date", "0"))
+    except ValueError:
+        return None
+    if auth_date <= 0 or time.time() - auth_date > INIT_DATA_MAX_AGE_SECONDS:
+        logger.warning("Expired Telegram initData")
+        return None
+
+    try:
+        user = json.loads(params.get("user", "{}"))
+        user_id = int(user.get("id"))
+    except Exception:
+        return None
+
+    return {
+        "init_data": init_data,
+        "params": params,
+        "user": user,
+        "user_id": user_id,
+    }
+
+
+def _parse_user_id(init_data: str) -> int | None:
+    user_data = validate_telegram_init_data(init_data)
+    return user_data["user_id"] if user_data else None
+
+
+def _content_meta(item: ArtistContent, include_url: bool = False) -> dict:
+    data = {
+        "id": item.id,
+        "title": item.title or "",
+        "thumbnail_url": item.thumbnail_url or (_auto_thumbnail(item.url) if include_url else "") or "",
+        "artist_name": item.artist_name,
+        "tags": item.tags or "",
+        "sort_order": item.sort_order,
+        "created_at": item.created_at.isoformat() if item.created_at else "",
+        "content_type": item.content_type,
+    }
+    if include_url:
+        data["url"] = item.url
+        data["embed_url"] = item.url
+    return data
+
 
 async def _notify_admins(text: str):
     from config import ADMIN_IDS
@@ -65,7 +146,10 @@ async def cors_middleware(request, handler):
 async def tribute_webhook(request: web.Request) -> web.Response:
     body = await request.read()
     signature = request.headers.get("trbt-signature", "")
-    if TRIBUTE_API_KEY and signature:
+    if TRIBUTE_API_KEY and not signature:
+        logger.warning("Missing Tribute signature")
+        return web.Response(status=403)
+    if TRIBUTE_API_KEY:
         expected = hmac.new(TRIBUTE_API_KEY.encode(), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, signature):
             logger.warning("Invalid Tribute signature")
@@ -191,13 +275,10 @@ async def parse_init_data(request: web.Request) -> dict:
     try:
         data = await request.json()
         init_data = data.get("initData", "")
-        if not init_data:
-            return None
-        return {"init_data": init_data}
+        return validate_telegram_init_data(init_data)
     except:
         return None
 
-# Тот самый эндпоинт, который мы починили!
 async def api_create_stars_invoice(request: web.Request) -> web.Response:
     user_data = await parse_init_data(request)
     if not user_data:
@@ -205,26 +286,18 @@ async def api_create_stars_invoice(request: web.Request) -> web.Response:
     
     try:
         data = await request.json()
-        days = data.get("days", 30)
-        tier = data.get("tier", "plus")
+        tier = str(data.get("tier", "plus")).lower()
     except:
-        days = 30
         tier = "plus"
 
-    stars = STARS_TIER_PRICES.get(tier, STARS_PRICES.get(days, 500))
-    
-    # Достаем ID юзера из initData, чтобы положить его в payload
-    params = dict(urllib.parse.parse_qsl(user_data["init_data"]))
-    user_id = None
-    if 'user' in params:
-        user_info = json.loads(params['user'])
-        user_id = user_info.get('id')
-    
-    if not user_id:
-        return web.json_response({"error": "Cannot parse user"}, status=400)
+    plan = MINIAPP_STARS_PLANS.get(tier)
+    if not plan:
+        return web.json_response({"error": "Invalid tier"}, status=400)
 
-    # Строка, которая вернется тебе в successful_payment
-    payload = f"stars_{days}_{user_id}"
+    user_id = user_data["user_id"]
+    days = plan["days"]
+    stars = plan["stars"]
+    payload = f"stars_tier_{tier}_{user_id}"
     
     bot = Bot(token=BOT_TOKEN)
     try:
@@ -240,7 +313,8 @@ async def api_create_stars_invoice(request: web.Request) -> web.Response:
         return web.json_response({
             "invoice_link": invoice_link,
             "stars": stars,
-            "days": days
+            "days": days,
+            "tier": tier,
         })
     except Exception as e:
         logger.error(f"Error creating invoice: {e}")
@@ -253,16 +327,10 @@ async def api_check_invite(request: web.Request) -> web.Response:
     """POST /miniapp/check_invite — returns and consumes pending invite link for the user."""
     try:
         data = await request.json()
-        init_data = data.get("initData", "")
-        if not init_data:
+        user_data = validate_telegram_init_data(data.get("initData", ""))
+        if not user_data:
             return web.json_response({"invite_link": None})
-        params = dict(urllib.parse.parse_qsl(init_data))
-        user_id = None
-        if 'user' in params:
-            user_info = json.loads(params['user'])
-            user_id = user_info.get('id')
-        if not user_id:
-            return web.json_response({"invite_link": None})
+        user_id = user_data["user_id"]
         async with async_session() as session:
             link = await consume_pending_invite(session, int(user_id))
         return web.json_response({"invite_link": link})
@@ -295,13 +363,7 @@ async def api_get_artists(request: web.Request) -> web.Response:
 async def api_get_profile(request: web.Request) -> web.Response:
     try:
         data = await request.json()
-        init_data = data.get("initData", "")
-        if not init_data: return web.json_response({"error": "No initData"}, status=400)
-        
-        params = dict(urllib.parse.parse_qsl(init_data))
-        user_id = None
-        if 'user' in params:
-            user_id = json.loads(params['user']).get('id')
+        user_id = _parse_user_id(data.get("initData", ""))
         if not user_id: return web.json_response({"error": "Cannot parse user"}, status=400)
         
         async with async_session() as session:
@@ -337,8 +399,7 @@ async def api_set_language(request: web.Request) -> web.Response:
         if not init_data: return web.json_response({"error": "No initData"}, status=400)
         if lang not in ("en", "ru", "es"): return web.json_response({"error": "Invalid language"}, status=400)
         
-        params = dict(urllib.parse.parse_qsl(init_data))
-        user_id = json.loads(params['user']).get('id') if 'user' in params else None
+        user_id = _parse_user_id(init_data)
         if not user_id: return web.json_response({"error": "Cannot parse user"}, status=403)
         
         async with async_session() as session:
@@ -360,8 +421,7 @@ async def api_set_notify_expiry(request: web.Request) -> web.Response:
         init_data, notify = data.get("initData", ""), data.get("notify_expiry", True)
         if not init_data: return web.json_response({"error": "No initData"}, status=400)
         
-        params = dict(urllib.parse.parse_qsl(init_data))
-        user_id = json.loads(params['user']).get('id') if 'user' in params else None
+        user_id = _parse_user_id(init_data)
         if not user_id: return web.json_response({"error": "Cannot parse user"}, status=403)
         
         async with async_session() as session:
@@ -383,8 +443,7 @@ async def api_get_favorites(request: web.Request) -> web.Response:
         init_data = data.get("initData", "")
         if not init_data: return web.json_response({"error": "No initData"}, status=403)
         
-        params = dict(urllib.parse.parse_qsl(init_data))
-        user_id = json.loads(params['user']).get('id') if 'user' in params else None
+        user_id = _parse_user_id(init_data)
         if not user_id: return web.json_response({"error": "Cannot parse user"}, status=403)
         
         async with async_session() as session:
@@ -395,7 +454,7 @@ async def api_get_favorites(request: web.Request) -> web.Response:
             from database import Favorite
             result = await session.execute(select(Favorite).where(Favorite.telegram_id == user_id))
             favorites = result.scalars().all()
-            items = [{"id": f.id, "title": f.title, "url": f.url} for f in favorites]
+            items = [{"id": f.id, "title": f.title, "content_id": f.content_id} for f in favorites]
             return web.json_response({"items": items, "count": len(items), "limit": 100})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
@@ -406,8 +465,7 @@ async def api_add_favorite(request: web.Request) -> web.Response:
         init_data, url, title = data.get("initData", ""), data.get("url", ""), data.get("title", "")
         if not init_data or not url or not title: return web.json_response({"error": "Missing data"}, status=400)
         
-        params = dict(urllib.parse.parse_qsl(init_data))
-        user_id = json.loads(params['user']).get('id') if 'user' in params else None
+        user_id = _parse_user_id(init_data)
         if not user_id: return web.json_response({"error": "Cannot parse user"}, status=403)
         
         async with async_session() as session:
@@ -432,8 +490,7 @@ async def api_delete_favorite(request: web.Request) -> web.Response:
         init_data, fav_id = data.get("initData", ""), data.get("id", 0)
         if not init_data or not fav_id: return web.json_response({"error": "Missing data"}, status=400)
         
-        params = dict(urllib.parse.parse_qsl(init_data))
-        user_id = json.loads(params['user']).get('id') if 'user' in params else None
+        user_id = _parse_user_id(init_data)
         if not user_id: return web.json_response({"error": "Cannot parse user"}, status=403)
         
         async with async_session() as session:
@@ -455,8 +512,7 @@ async def api_free_trial(request: web.Request) -> web.Response:
         if not init_data:
             return web.json_response({"error": "No initData"}, status=400)
 
-        params = dict(urllib.parse.parse_qsl(init_data))
-        user_id = json.loads(params['user']).get('id') if 'user' in params else None
+        user_id = _parse_user_id(init_data)
         if not user_id:
             return web.json_response({"error": "Cannot parse user"}, status=403)
 
@@ -501,12 +557,7 @@ async def api_get_videos(request: web.Request) -> web.Response:
                 .limit(limit)
             )
             videos = result.scalars().all()
-            videos_data = [{
-                "id": v.id, "title": v.title or "", "url": v.url,
-                "embed_url": v.url, "thumbnail_url": v.thumbnail_url or _auto_thumbnail(v.url) or "",
-                "artist_name": v.artist_name, "tags": v.tags or "",
-                "created_at": v.created_at.isoformat() if v.created_at else ""
-            } for v in videos]
+            videos_data = [_content_meta(v) for v in videos]
             return web.json_response({"videos": videos_data, "total": len(videos_data)})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
@@ -559,12 +610,7 @@ async def api_get_artist_content(request: web.Request) -> web.Response:
             rows, has_more = await _fetch(content_type, lim, offset, tag_filter)
 
             def _fmt_item(v):
-                base = {"id": v.id, "title": v.title or "", "url": v.url,
-                        "thumbnail_url": v.thumbnail_url or _auto_thumbnail(v.url) or "",
-                        "tags": v.tags or "", "sort_order": v.sort_order}
-                if content_type == "photo":
-                    return {"id": v.id, "url": v.url, "sort_order": v.sort_order}
-                return base
+                return _content_meta(v)
 
             return web.json_response({
                 "type": content_type, "offset": offset,
@@ -578,17 +624,42 @@ async def api_get_artist_content(request: web.Request) -> web.Response:
             shorts, s_more = await _fetch("short", LIMITS["short"], 0)
             return web.json_response({
                 "artist": artist_name,
-                "videos": [{"id": v.id, "title": v.title or "", "url": v.url,
-                             "thumbnail_url": v.thumbnail_url or _auto_thumbnail(v.url) or "",
-                             "tags": v.tags or "", "sort_order": v.sort_order} for v in videos],
+                "videos": [_content_meta(v) for v in videos],
                 "videos_more": v_more,
-                "photos": [{"id": p.id, "url": p.url, "sort_order": p.sort_order} for p in photos],
+                "photos": [_content_meta(p) for p in photos],
                 "photos_more": p_more,
-                "shorts": [{"id": s.id, "title": s.title or "", "url": s.url,
-                             "thumbnail_url": s.thumbnail_url or _auto_thumbnail(s.url) or "",
-                             "tags": s.tags or "", "sort_order": s.sort_order} for s in shorts],
+                "shorts": [_content_meta(s) for s in shorts],
                 "shorts_more": s_more,
             })
+
+
+async def api_content_play(request: web.Request) -> web.Response:
+    """POST /miniapp/content/play — return a playable URL only for active users."""
+    try:
+        data = await request.json()
+        user_id = _parse_user_id(data.get("initData", ""))
+        content_id = int(data.get("content_id", 0))
+        if not user_id or not content_id:
+            return web.json_response({"error": "Missing data"}, status=400)
+
+        async with async_session() as session:
+            user_result = await session.execute(select(User).where(User.telegram_id == user_id))
+            user = user_result.scalar_one_or_none()
+            if not user or user.units <= 0:
+                return web.json_response({"error": "No subscription"}, status=403)
+
+            content_result = await session.execute(
+                select(ArtistContent).where(ArtistContent.id == content_id)
+            )
+            content = content_result.scalar_one_or_none()
+            if not content:
+                return web.json_response({"error": "Not found"}, status=404)
+
+            payload = _content_meta(content, include_url=True)
+            return web.json_response(payload)
+    except Exception as e:
+        logger.error("content play error: %s", e)
+        return web.json_response({"error": str(e)}, status=500)
 
 
 async def api_crypto_checkout(request: web.Request) -> web.Response:
@@ -603,12 +674,7 @@ async def api_crypto_checkout(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "Bad body"}, status=400)
 
-    params = dict(urllib.parse.parse_qsl(user_data["init_data"]))
-    user_id = None
-    if 'user' in params:
-        user_id = json.loads(params['user']).get('id')
-    if not user_id:
-        return web.json_response({"error": "Cannot parse user"}, status=400)
+    user_id = user_data["user_id"]
 
     wallets = {
         "USDT_TRC20": (CRYPTO_WALLET_USDT_TRC20, "TRC20",    "USDT"),
@@ -664,6 +730,7 @@ async def api_crypto_claim(request: web.Request) -> web.Response:
     user_data = await parse_init_data(request)
     if not user_data:
         return web.json_response({"error": "Invalid request"}, status=400)
+    user_id = user_data["user_id"]
     try:
         data = await request.json()
         order_uuid = data.get("order_uuid", "")
@@ -682,6 +749,8 @@ async def api_crypto_claim(request: web.Request) -> web.Response:
         )
         row = result.mappings().one_or_none()
         if not row:
+            return web.json_response({"error": "Order not found"}, status=404)
+        if int(row["telegram_id"]) != int(user_id):
             return web.json_response({"error": "Order not found"}, status=404)
         if row["status"] not in ("pending",):
             return web.json_response({"error": "Order already processed"}, status=409)
@@ -719,13 +788,7 @@ async def api_get_shorts(request: web.Request) -> web.Response:
                 .limit(limit)
             )
             shorts = result.scalars().all()
-        return web.json_response({"shorts": [
-            {"id": s.id, "title": s.title or "", "url": s.url,
-             "thumbnail_url": s.thumbnail_url or _auto_thumbnail(s.url) or "",
-             "artist_name": s.artist_name, "tags": s.tags or "",
-             "created_at": s.created_at.isoformat() if s.created_at else ""}
-            for s in shorts
-        ]})
+        return web.json_response({"shorts": [_content_meta(s) for s in shorts]})
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 
@@ -743,10 +806,7 @@ async def api_watch_progress(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "Bad body"}, status=400)
 
-    params = dict(urllib.parse.parse_qsl(user_data["init_data"]))
-    user_id = None
-    if 'user' in params:
-        user_id = json.loads(params['user']).get('id')
+    user_id = user_data["user_id"]
     if not user_id or not content_id:
         return web.json_response({"ok": False})
 
@@ -768,12 +828,7 @@ async def api_continue_watching(request: web.Request) -> web.Response:
     if not user_data:
         return web.json_response({"error": "Invalid request"}, status=400)
 
-    params = dict(urllib.parse.parse_qsl(user_data["init_data"]))
-    user_id = None
-    if 'user' in params:
-        user_id = json.loads(params['user']).get('id')
-    if not user_id:
-        return web.json_response({"items": []})
+    user_id = user_data["user_id"]
 
     from sqlalchemy import text as _t
     async with async_session() as session:
@@ -793,8 +848,8 @@ async def api_continue_watching(request: web.Request) -> web.Response:
 
     return web.json_response({"items": [
         {"id": r["content_id"], "title": r["title"] or "",
-         "url": r["url"], "artist_name": r["artist_name"] or "",
-         "thumbnail_url": r["thumbnail_url"] or _auto_thumbnail(r["url"]) or "",
+         "artist_name": r["artist_name"] or "",
+         "thumbnail_url": r["thumbnail_url"] or "",
          "tags": r["tags"] or "",
          "progress": r["progress_seconds"], "duration": r["duration_seconds"]}
         for r in rows
@@ -824,10 +879,7 @@ async def api_search(request: web.Request) -> web.Response:
         items = result.scalars().all()
 
     return web.json_response({"results": [
-        {"id": v.id, "title": v.title or "", "url": v.url,
-         "thumbnail_url": v.thumbnail_url or _auto_thumbnail(v.url) or "",
-         "artist_name": v.artist_name or "", "tags": v.tags or "",
-         "created_at": v.created_at.isoformat() if v.created_at else ""}
+        _content_meta(v)
         for v in items
     ]})
 
@@ -845,12 +897,7 @@ async def api_toggle_follow(request: web.Request) -> web.Response:
     if not artist_name:
         return web.json_response({"error": "artist_name required"}, status=400)
 
-    params  = dict(urllib.parse.parse_qsl(user_data["init_data"]))
-    user_id = None
-    if 'user' in params:
-        user_id = json.loads(params['user']).get('id')
-    if not user_id:
-        return web.json_response({"error": "Cannot parse user"}, status=400)
+    user_id = user_data["user_id"]
 
     from sqlalchemy import text as _t
     async with async_session() as session:
@@ -884,12 +931,7 @@ async def api_get_follows(request: web.Request) -> web.Response:
     user_data = await parse_init_data(request)
     if not user_data:
         return web.json_response({"error": "Invalid request"}, status=400)
-    params  = dict(urllib.parse.parse_qsl(user_data["init_data"]))
-    user_id = None
-    if 'user' in params:
-        user_id = json.loads(params['user']).get('id')
-    if not user_id:
-        return web.json_response({"artists": []})
+    user_id = user_data["user_id"]
 
     from sqlalchemy import text as _t
     async with async_session() as session:
@@ -911,12 +953,7 @@ async def api_followed_feed(request: web.Request) -> web.Response:
     user_data = await parse_init_data(request)
     if not user_data:
         return web.json_response({"error": "Invalid request"}, status=400)
-    params  = dict(urllib.parse.parse_qsl(user_data["init_data"]))
-    user_id = None
-    if 'user' in params:
-        user_id = json.loads(params['user']).get('id')
-    if not user_id:
-        return web.json_response({"videos": []})
+    user_id = user_data["user_id"]
 
     from sqlalchemy import text as _t
     async with async_session() as session:
@@ -932,8 +969,8 @@ async def api_followed_feed(request: web.Request) -> web.Response:
         """), {"uid": user_id})
         rows = result.mappings().all()
     return web.json_response({"videos": [
-        {"id": r["id"], "title": r["title"] or "", "url": r["url"],
-         "thumbnail_url": r["thumbnail_url"] or _auto_thumbnail(r["url"]) or "",
+        {"id": r["id"], "title": r["title"] or "",
+         "thumbnail_url": r["thumbnail_url"] or "",
          "artist_name": r["artist_name"] or "", "tags": r["tags"] or "",
          "created_at": r["created_at"].isoformat() if r["created_at"] else ""}
         for r in rows
@@ -945,12 +982,7 @@ async def api_user_stats(request: web.Request) -> web.Response:
     user_data = await parse_init_data(request)
     if not user_data:
         return web.json_response({"error": "Invalid request"}, status=400)
-    params  = dict(urllib.parse.parse_qsl(user_data["init_data"]))
-    user_id = None
-    if 'user' in params:
-        user_id = json.loads(params['user']).get('id')
-    if not user_id:
-        return web.json_response({"stats": {}})
+    user_id = user_data["user_id"]
 
     from sqlalchemy import text as _t
     async with async_session() as session:
@@ -979,14 +1011,6 @@ async def api_get_tags(request: web.Request) -> web.Response:
         return web.json_response({
             "tags": [{"name": t.name, "color": t.color} for t in tags]
         })
-
-
-def _parse_user_id(init_data: str) -> int | None:
-    params = dict(urllib.parse.parse_qsl(init_data))
-    try:
-        return json.loads(params['user']).get('id') if 'user' in params else None
-    except Exception:
-        return None
 
 
 async def api_get_video_reactions(request: web.Request) -> web.Response:
@@ -1173,6 +1197,12 @@ async def api_toggle_favorite(request: web.Request) -> web.Response:
                 await session.commit()
                 return web.json_response({"ok": True, "favorited": False})
             else:
+                content_result = await session.execute(
+                    select(ArtistContent).where(ArtistContent.id == content_id)
+                )
+                content = content_result.scalar_one_or_none()
+                if not content:
+                    return web.json_response({"error": "Content not found"}, status=404)
                 # Check limit
                 from sqlalchemy import func as sa_func
                 count_result = await session.execute(
@@ -1183,8 +1213,8 @@ async def api_toggle_favorite(request: web.Request) -> web.Response:
                 fav = Favorite(
                     telegram_id=user_id,
                     content_id=content_id,
-                    title=data.get("title", "Video")[:128],
-                    url=data.get("url", ""),
+                    title=(content.title or "Video")[:128],
+                    url=content.url,
                 )
                 session.add(fav)
                 await session.commit()
@@ -1239,7 +1269,7 @@ async def api_get_favorites_v2(request: web.Request) -> web.Response:
                     content_map[c.id] = c
 
             for f in favorites:
-                item = {"id": f.id, "title": f.title, "url": f.url, "content_id": f.content_id}
+                item = {"id": f.id, "title": f.title, "content_id": f.content_id}
                 if f.content_id and f.content_id in content_map:
                     c = content_map[f.content_id]
                     item.update({
@@ -1420,7 +1450,7 @@ async def api_playlist_items(request: web.Request) -> web.Response:
                 c = content_map.get(pi.content_id)
                 if c:
                     items_out.append({
-                        "id": c.id, "title": c.title or "", "url": c.url,
+                        "id": c.id, "title": c.title or "",
                         "artist_name": c.artist_name, "tags": c.tags or "",
                         "thumbnail_url": c.thumbnail_url or "",
                     })
@@ -1455,6 +1485,7 @@ def create_app() -> web.Application:
     app.router.add_post("/miniapp/playlists/remove_item", api_playlist_remove_item)
     app.router.add_post("/miniapp/playlists/items", api_playlist_items)
     app.router.add_get("/miniapp/artist_content", api_get_artist_content)
+    app.router.add_post("/miniapp/content/play", api_content_play)
     app.router.add_post("/miniapp/crypto/checkout", api_crypto_checkout)
     app.router.add_post("/miniapp/crypto/claim", api_crypto_claim)
     app.router.add_post("/miniapp/watch_progress", api_watch_progress)

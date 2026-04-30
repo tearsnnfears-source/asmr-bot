@@ -12,15 +12,52 @@ from aiogram import Router, F, Bot
 from aiogram.types import PreCheckoutQuery, Message
 from aiogram.types.message import ContentType
 from sqlalchemy.ext.asyncio import AsyncSession
-from database import get_or_create_user, PendingPayment, create_pending_invite
+from database import get_or_create_user, PendingPayment, create_pending_invite, assign_tier_badge
 from keyboards.inline import kb_payment, kb_plans, kb_after_payment, kb_back_to_cabinet
 from locales.texts import t
-from config import STARS_PRICES, INVITE_LINK, GROUP_ID
+from config import STARS_PRICES, STARS_TIER_PRICES, INVITE_LINK, GROUP_ID
 
 router = Router()
 logger = logging.getLogger(__name__)
 
 PAYMENT_IMAGE = "AgACAgIAAxkBAAIBQGm7cq7ZO6fKjw7XrFrMiyI4X3h3AALXEWsbpuDhSd4hIjY-KzpiAQADAgADeQADOgQ"
+
+MINIAPP_STARS_PLANS = {
+    "plus": {"days": 31, "stars": STARS_TIER_PRICES["plus"]},
+    "pro": {"days": 31, "stars": STARS_TIER_PRICES["pro"]},
+}
+LEGACY_STARS_DAY_PRICES = {
+    **STARS_PRICES,
+    31: STARS_TIER_PRICES["plus"],  # old miniapp invoices created before tier payloads
+}
+
+
+def _resolve_stars_payload(payload: str) -> tuple[int, str, int] | None:
+    """Return (days, tier, expected_amount) for known Stars payloads."""
+    days = None
+    tier = "plus"
+    expected_amount = None
+
+    if payload.startswith("stars_"):
+        parts = payload.split("_")
+        if len(parts) >= 4 and parts[1] == "tier":
+            tier = parts[2].lower()
+            plan = MINIAPP_STARS_PLANS.get(tier)
+            if plan:
+                days = plan["days"]
+                expected_amount = plan["stars"]
+        elif len(parts) >= 2 and parts[1].isdigit():
+            days = int(parts[1])
+            expected_amount = LEGACY_STARS_DAY_PRICES.get(days)
+    elif payload.startswith("stars:"):
+        parts = payload.split(":")
+        if len(parts) >= 2 and parts[1].isdigit():
+            days = int(parts[1])
+            expected_amount = LEGACY_STARS_DAY_PRICES.get(days)
+
+    if not days or not expected_amount:
+        return None
+    return days, tier, expected_amount
 
 async def _notify_admins(bot: Bot, text: str):
     from config import ADMIN_IDS
@@ -80,6 +117,9 @@ async def cb_tribute(call: CallbackQuery, session: AsyncSession):
 @router.callback_query(F.data.startswith("pay:stars:"))
 async def cb_stars(call: CallbackQuery, session: AsyncSession, bot: Bot):
     days = int(call.data.split(":")[2])
+    if days not in STARS_PRICES:
+        await call.answer("Invalid plan", show_alert=True)
+        return
     user = await get_or_create_user(session, call.from_user.id)
     lang = user.lang or "en"
     stars = STARS_PRICES[days]
@@ -99,6 +139,30 @@ async def cb_stars(call: CallbackQuery, session: AsyncSession, bot: Bot):
 # 1. Разрешаем транзакцию, если валюта XTR (Звезды)
 @router.pre_checkout_query(F.currency == "XTR")
 async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery, bot: Bot):
+    resolved = _resolve_stars_payload(pre_checkout_query.invoice_payload)
+    if not resolved:
+        await bot.answer_pre_checkout_query(
+            pre_checkout_query.id,
+            ok=False,
+            error_message="Invalid payment plan",
+        )
+        logger.warning("Rejected Stars pre-checkout with unknown payload: %s", pre_checkout_query.invoice_payload)
+        return
+    _, _, expected_amount = resolved
+    if pre_checkout_query.total_amount != expected_amount:
+        await bot.answer_pre_checkout_query(
+            pre_checkout_query.id,
+            ok=False,
+            error_message="Invalid payment amount",
+        )
+        logger.warning(
+            "Rejected Stars pre-checkout amount mismatch: user=%s paid=%s expected=%s payload=%s",
+            pre_checkout_query.from_user.id,
+            pre_checkout_query.total_amount,
+            expected_amount,
+            pre_checkout_query.invoice_payload,
+        )
+        return
     await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
     logger.info(f"Pre-checkout approved for user {pre_checkout_query.from_user.id}")
 
@@ -113,17 +177,18 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
 
         logger.info(f"Successful payment from user {user_id}, payload: {payload}")
 
-        # Поддерживаем оба формата: "stars_30_userid" (mini app) и "stars:30:userid" (bot)
-        days = None
-        if payload.startswith("stars_"):
-            parts = payload.split("_")
-            days = int(parts[1])
-        elif payload.startswith("stars:"):
-            parts = payload.split(":")
-            days = int(parts[1])
-
-        if not days:
+        # Поддерживаем форматы: "stars_tier_plus_userid" (mini app), "stars_30_userid" и "stars:30:userid" (legacy bot)
+        resolved = _resolve_stars_payload(payload)
+        if not resolved:
             logger.warning(f"Unknown Stars payload format: {payload}")
+            return
+        days, tier, expected_amount = resolved
+        paid_amount = message.successful_payment.total_amount
+        if paid_amount != expected_amount:
+            logger.warning(
+                "Stars amount mismatch for user %s: payload=%s paid=%s expected=%s",
+                user_id, payload, paid_amount, expected_amount,
+            )
             return
 
         # Начисляем подписку (Stars — без grace debt, стартуем от 0 если был в минусе)
@@ -133,6 +198,8 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
         user.units = base + days
         user.is_active = True
         user.last_payment_method = "stars"
+        user.tier = tier
+        assign_tier_badge(user)
         await session.commit()
 
         logger.info(f"Stars credited: user {user_id} +{days} days → total {user.units}")

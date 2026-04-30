@@ -80,20 +80,31 @@ async def on_new_member(event: ChatMemberUpdated, bot: Bot, session: AsyncSessio
     if new_member.is_bot:
         return
 
-    # user = await get_user(session, new_member.id)
+    if new_member.id in ADMIN_IDS:
+        return
 
-    # if not user or user.units <= 0:
-        # Нет подписки — кикаем
-    #    try:
-    #        await bot.ban_chat_member(GROUP_ID, new_member.id)
-    #        await bot.unban_chat_member(GROUP_ID, new_member.id)
-    #        logger.info(f"Kicked {new_member.id} — no subscription")
-    #    except Exception as e:
-    #        logger.error(f"Cannot kick {new_member.id}: {e}")
-    # else:
-    #    user.is_active = True
-    #    await session.commit()
-    #    logger.info(f"User {new_member.id} joined with {user.units} units")
+    user = await get_user(session, new_member.id)
+    has_paid_access = bool(
+        user
+        and user.is_active
+        and (
+            user.units > 0
+            or ((user.last_payment_method or "") == "tribute" and user.units > -7)
+        )
+    )
+
+    if not has_paid_access:
+        try:
+            await bot.ban_chat_member(GROUP_ID, new_member.id)
+            await bot.unban_chat_member(GROUP_ID, new_member.id)
+            logger.info(f"Kicked {new_member.id} — no active subscription")
+        except Exception as e:
+            logger.error(f"Cannot kick {new_member.id}: {e}")
+        return
+
+    user.is_active = True
+    await session.commit()
+    logger.info(f"User {new_member.id} joined with {user.units} units")
 
 
 # ─── Ночной режим ─────────────────────────────────────────────────────────────

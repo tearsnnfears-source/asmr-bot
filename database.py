@@ -275,12 +275,15 @@ async def init_db():
 
 async def _backfill_thumbnails():
     """Проставляет thumbnail_url для видео и контента где его нет."""
-    from sqlalchemy import select
+    from sqlalchemy import or_, select
     try:
         async with async_session() as session:
             # Old Video table
             result = await session.execute(
-                select(Video).where(Video.thumbnail_url == None, Video.is_active == True)
+                select(Video).where(
+                    Video.is_active == True,
+                    or_(Video.thumbnail_url == None, Video.thumbnail_url == ""),
+                )
             )
             videos = result.scalars().all()
             updated = 0
@@ -292,7 +295,9 @@ async def _backfill_thumbnails():
 
             # ArtistContent (shorts, videos, photos)
             result2 = await session.execute(
-                select(ArtistContent).where(ArtistContent.thumbnail_url == None)
+                select(ArtistContent).where(
+                    or_(ArtistContent.thumbnail_url == None, ArtistContent.thumbnail_url == "")
+                )
             )
             contents = result2.scalars().all()
             for item in contents:

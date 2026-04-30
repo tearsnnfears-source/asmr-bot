@@ -80,10 +80,11 @@ def _parse_user_id(init_data: str) -> int | None:
 
 
 def _content_meta(item: ArtistContent, include_url: bool = False) -> dict:
+    thumbnail_url = item.thumbnail_url or _auto_thumbnail(item.url) or ""
     data = {
         "id": item.id,
         "title": item.title or "",
-        "thumbnail_url": item.thumbnail_url or (_auto_thumbnail(item.url) if include_url else "") or "",
+        "thumbnail_url": thumbnail_url,
         "artist_name": item.artist_name,
         "tags": item.tags or "",
         "sort_order": item.sort_order,

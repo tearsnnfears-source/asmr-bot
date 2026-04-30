@@ -582,6 +582,36 @@ async def api_free_trial(request: web.Request) -> web.Response:
                 f"📅 Активировал 5 бесплатных дней"
             )
 
+            if invite_link:
+                bot = Bot(token=BOT_TOKEN)
+                try:
+                    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                    lang = user.lang or "en"
+                    if lang == "ru":
+                        text = (
+                            "✅ <b>Бесплатный период активирован!</b>\n\n"
+                            "📅 Добавлено: <b>5 дней</b>\n\n"
+                            "👇 Нажмите кнопку ниже, чтобы вступить в закрытую группу.\n"
+                            "<i>Ссылка одноразовая и действует 72 часа.</i>"
+                        )
+                        button_text = "🔗 Вступить в группу"
+                    else:
+                        text = (
+                            "✅ <b>Free trial activated!</b>\n\n"
+                            "📅 Added: <b>5 days</b>\n\n"
+                            "👇 Tap the button below to join the private group.\n"
+                            "<i>The link is one-time and expires in 72 hours.</i>"
+                        )
+                        button_text = "🔗 Join the group"
+                    kb = InlineKeyboardMarkup(inline_keyboard=[[
+                        InlineKeyboardButton(text=button_text, url=invite_link)
+                    ]])
+                    await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
+                except Exception as e:
+                    logger.error(f"Cannot send trial invite to user {user_id}: {e}")
+                finally:
+                    await bot.session.close()
+
             return web.json_response({"ok": True, "days_left": user.units, "invite_link": invite_link})
     except Exception as e:
         logger.error(f"Error in api_free_trial: {e}")

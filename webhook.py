@@ -81,6 +81,10 @@ def _parse_user_id(init_data: str) -> int | None:
 
 def _content_meta(item: ArtistContent, include_url: bool = False) -> dict:
     thumbnail_url = item.thumbnail_url or _auto_thumbnail(item.url) or ""
+    # Photos are their own thumbnails — fall back to the image URL itself
+    # so the grid can render without a separate /content/play round-trip.
+    if not thumbnail_url and item.content_type == "photo" and item.url:
+        thumbnail_url = item.url
     data = {
         "id": item.id,
         "title": item.title or "",

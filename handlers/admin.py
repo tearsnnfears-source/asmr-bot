@@ -850,7 +850,9 @@ async def cmd_confirm_crypto(message: Message, session: AsyncSession, bot: Bot):
             user = User(telegram_id=row["telegram_id"], units=31, is_active=True, tier=row["tier"], last_payment_method="crypto")
             s.add(user)
         else:
-            user.units += 31
+            # Grace debt не переносится — оплата всегда даёт 31 день поверх активного остатка.
+            base = max(0, user.units)
+            user.units = base + 31
             user.is_active = True
             user.tier = row["tier"]
             user.last_payment_method = "crypto"

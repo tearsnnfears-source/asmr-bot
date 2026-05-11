@@ -229,11 +229,11 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     tier=new_tier,
                 )
                 session.add(user)
-                grace_debt = 0
             else:
-                # Grace period: preserve negative balance (anti-abuse)
-                grace_debt = min(0, user.units)  # e.g. -3 if in grace period
-                user.units += TRIBUTE_DAYS  # -3 + 31 = 28 effective days
+                # Grace debt не переносится: при оплате юзер получает полные 31 день,
+                # активный остаток (>0) суммируется как при обычном продлении.
+                base = max(0, user.units)
+                user.units = base + TRIBUTE_DAYS
                 user.is_active = True
                 user.last_payment_method = "tribute"
                 if new_tier == 'pro' or getattr(user, 'tier', 'plus') != 'pro':
@@ -247,11 +247,10 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         # Уведомление админу о Tribute оплате
         username = payload.get("telegram_username", "")
         nick = f"@{username}" if username else f"id{telegram_id}"
-        grace_note = f" (grace debt: {grace_debt}d)" if grace_debt < 0 else ""
         await _notify_admins(
             f"💳 <b>Новая оплата — Tribute</b>\n"
             f"👤 {nick} | <code>{telegram_id}</code>\n"
-            f"📅 +{TRIBUTE_DAYS}{grace_note} | Итого: {total} дн."
+            f"📅 +{TRIBUTE_DAYS} | Итого: {total} дн."
         )
 
         bot = Bot(token=BOT_TOKEN)

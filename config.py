@@ -53,14 +53,20 @@ SUPPORT_URL   = os.getenv("SUPPORT_URL", "https://t.me/sonnnnnua")
 NIGHT_START = 23
 NIGHT_END   = 8
 
-# Crypto payment wallets
+# Crypto payment wallets (legacy manual flow — kept only for backward-compat env)
 CRYPTO_WALLET_USDT_TRC20 = os.getenv("CRYPTO_WALLET_USDT_TRC20", "")
 CRYPTO_WALLET_USDT_TON   = os.getenv("CRYPTO_WALLET_USDT_TON",   "")
 CRYPTO_WALLET_ETH         = os.getenv("CRYPTO_WALLET_ETH",        "")
 
-# Crypto prices in USDT per tier
+# Crypto prices in USD per tier (used as `amount` for Cryptocloud invoice)
 CRYPTO_USDT_PRICES = {
     'plus':  6,
     'pro':   8,
     'elite': 10,
 }
+
+# Cryptocloud (https://cryptocloud.plus) — hosted crypto checkout
+CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY", "")
+CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID", "")
+CRYPTOCLOUD_SECRET  = os.getenv("CRYPTOCLOUD_SECRET", "")  # HS256 secret for postback JWT verification
+CRYPTOCLOUD_API_URL = os.getenv("CRYPTOCLOUD_API_URL", "https://api.cryptocloud.plus/v2/invoice/create")

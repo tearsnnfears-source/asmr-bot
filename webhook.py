@@ -1668,9 +1668,24 @@ async def api_playlist_items(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=500)
 
 
+async def api_health(request: web.Request) -> web.Response:
+    """GET /health — lightweight DB liveness probe for the miniapp/site.
+    Returns 200 {status:'ok'} when the DB answers SELECT 1, 503 otherwise.
+    Never raises — frontend uses it as a fast yes/no check during boot.
+    """
+    try:
+        async with async_session() as session:
+            await session.execute(sa_text("SELECT 1"))
+        return web.json_response({"status": "ok"})
+    except Exception as e:
+        logger.warning(f"/health DB probe failed: {e}")
+        return web.json_response({"status": "db_error"}, status=503)
+
+
 def create_app() -> web.Application:
     app = web.Application()
     app.middlewares.append(cors_middleware)
+    app.router.add_get("/health", api_health)
     app.router.add_post("/tribute-webhook", tribute_webhook)
     app.router.add_post("/miniapp/create_stars_invoice", api_create_stars_invoice)
     app.router.add_post("/miniapp/check_invite", api_check_invite)

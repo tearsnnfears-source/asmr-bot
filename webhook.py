@@ -203,20 +203,32 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             result = await session.execute(select(User).where(User.telegram_id == telegram_id))
             user = result.scalar_one_or_none()
 
-            # Determine tier by amount (most reliable — startapp substring matching was error-prone)
+            # Tribute шлёт сумму в МИНОРНЫХ единицах (центах), e.g. 540 для 5.40 EUR.
+            # Раньше код трактовал это как евро → 540 >= 8.5 → ELITE для всех плательщиков.
+            # Sanity: подписки €6–€8, поэтому любое значение ≥100 — это точно центы.
             try:
-                amount_eur = float(payload.get("amount", 0) or payload.get("price", 0) or 0)
+                raw_amount = payload.get("amount", 0) or payload.get("price", 0) or 0
+                amount_eur = float(raw_amount)
+                if amount_eur >= 100:
+                    amount_eur = amount_eur / 100.0
             except Exception:
                 amount_eur = 0
 
-            if amount_eur >= 8.5:
-                new_tier = 'elite'
-            elif amount_eur >= 7.0:
+            # ELITE никогда не выдаётся автоматом — только админом вручную.
+            # Tribute может проставить только PLUS или PRO.
+            if amount_eur >= 7.0:
                 new_tier = 'pro'
             else:
                 new_tier = 'plus'
 
-            logger.info(f"Tribute payment: {amount_eur}€ → tier={new_tier}")
+            logger.info(
+                "Tribute payment: raw_amount=%s -> amount_eur=%.2f -> new_tier=%s (telegram_id=%s)",
+                payload.get("amount") or payload.get("price"),
+                amount_eur, new_tier, telegram_id,
+            )
+
+            # Никогда не понижаем admin-выданный тир (ELITE → PLUS/PRO) и не сбрасываем PRO.
+            TIER_RANK = {'plus': 1, 'pro': 2, 'elite': 3}
 
             TRIBUTE_DAYS = 31
             if not user:
@@ -236,8 +248,12 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                 user.units = base + TRIBUTE_DAYS
                 user.is_active = True
                 user.last_payment_method = "tribute"
-                if new_tier == 'pro' or getattr(user, 'tier', 'plus') != 'pro':
+                # Tier: только апгрейд. ELITE/PRO нельзя автоматически понизить через Tribute.
+                current_rank = TIER_RANK.get((user.tier or 'plus').lower(), 1)
+                new_rank     = TIER_RANK.get(new_tier, 1)
+                if new_rank > current_rank:
                     user.tier = new_tier
+                # else: оставляем существующий тир как есть.
             assign_tier_badge(user)
 
             await session.commit()

@@ -12,6 +12,26 @@ from config import GROUP_ID, NIGHT_START, NIGHT_END, INVITE_LINK, ADMIN_IDS
 logger = logging.getLogger(__name__)
 
 
+def _kick_reason(user) -> tuple[str, str]:
+    """Return (short_label, long_reason) describing why this user was kicked.
+
+    Distinguishes paid subscribers from free-trial users so the admin can
+    tell at a glance whether a renewal is expected or the slot just opened
+    up after a trial expired.
+    """
+    pm = (user.last_payment_method or '').lower()
+    if pm == 'tribute':
+        return ("Tribute", "💳 Tribute grace истёк")
+    if pm == 'stars':
+        return ("Stars",   "⭐ Stars-подписка закончилась")
+    if pm == 'crypto':
+        return ("Crypto",  "💎 Crypto-подписка закончилась")
+    if user.trial_used:
+        return ("Trial",   "🎁 Бесплатный триал закончился")
+    # Edge: admin вручную начислил дни без указания способа оплаты.
+    return ("Admin", "📅 Дни закончились (без способа оплаты)")
+
+
 async def daily_unit_check(bot: Bot):
     """
     Каждую ночь в 00:01 МСК:
@@ -44,7 +64,8 @@ async def daily_unit_check(bot: Bot):
                     await bot.unban_chat_member(GROUP_ID, user.telegram_id)
                     user.is_active = False
                     kicked += 1
-                    logger.info(f"Auto-kicked (no grace) {user.telegram_id}")
+                    short_label, long_reason = _kick_reason(user)
+                    logger.info(f"Auto-kicked ({short_label}) {user.telegram_id}")
                     nick = f"@{user.username}" if user.username else f"id{user.telegram_id}"
                     for admin_id in ADMIN_IDS:
                         try:
@@ -52,7 +73,7 @@ async def daily_unit_check(bot: Bot):
                                 admin_id,
                                 f"🚫 <b>Юзер удалён из группы</b>\n"
                                 f"👤 {nick} | <code>{user.telegram_id}</code>\n"
-                                f"📅 Подписка закончилась (без грейс)",
+                                f"{long_reason}",
                                 parse_mode="HTML"
                             )
                         except Exception:
@@ -90,7 +111,8 @@ async def daily_unit_check(bot: Bot):
                     await bot.unban_chat_member(GROUP_ID, user.telegram_id)
                     user.is_active = False
                     kicked += 1
-                    logger.info(f"Auto-kicked (grace expired) {user.telegram_id}")
+                    short_label, long_reason = _kick_reason(user)
+                    logger.info(f"Auto-kicked ({short_label}, grace expired) {user.telegram_id}")
 
                     nick = f"@{user.username}" if user.username else f"id{user.telegram_id}"
                     for admin_id in ADMIN_IDS:
@@ -99,7 +121,7 @@ async def daily_unit_check(bot: Bot):
                                 admin_id,
                                 f"🚫 <b>Юзер удалён из группы</b>\n"
                                 f"👤 {nick} | <code>{user.telegram_id}</code>\n"
-                                f"📅 Grace period истёк",
+                                f"{long_reason}",
                                 parse_mode="HTML"
                             )
                         except Exception:

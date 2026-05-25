@@ -686,7 +686,7 @@ async def api_get_artist_content(request: web.Request) -> web.Response:
             )
             if tag:
                 q2 = q2.where(ArtistContent.tags.ilike(f"%{tag}%"))
-            q2 = q2.order_by(ArtistContent.sort_order, ArtistContent.created_at.desc())
+            q2 = q2.order_by(ArtistContent.created_at.desc(), ArtistContent.id.desc())
             # Fetch lim+1 to know if there are more
             q2 = q2.offset(off).limit(lim + 1)
             result = await session.execute(q2)

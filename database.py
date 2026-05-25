@@ -464,7 +464,7 @@ async def get_artist_content(session: AsyncSession, artist_name: str,
     q = select(ArtistContent).where(ArtistContent.artist_name == artist_name)
     if content_type:
         q = q.where(ArtistContent.content_type == content_type)
-    q = q.order_by(ArtistContent.sort_order, ArtistContent.created_at.desc())
+    q = q.order_by(ArtistContent.created_at.desc(), ArtistContent.id.desc())
     result = await session.execute(q)
     return list(result.scalars().all())
 

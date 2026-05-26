@@ -1584,7 +1584,13 @@ async def api_get_favorites_v2(request: web.Request) -> web.Response:
 # ─── Playlists API ────────────────────────────────────────────────────────────
 
 async def api_get_playlists(request: web.Request) -> web.Response:
-    """POST /miniapp/playlists {initData}"""
+    """POST /miniapp/playlists {initData}
+
+    Returns playlists with item_count + up to 4 preview thumbnail URLs from
+    the most-recently-added items. The thumbs are used by the Saved →
+    Playlists 2x2 tile grid so the cards look like real collections rather
+    than colored gradients.
+    """
     try:
         data = await request.json()
         user_id = _parse_user_id(data.get("initData", ""))
@@ -1595,17 +1601,35 @@ async def api_get_playlists(request: web.Request) -> web.Response:
                 select(Playlist).where(Playlist.telegram_id == user_id).order_by(Playlist.created_at.desc())
             )
             playlists = result.scalars().all()
-            # Count items per playlist
+            from sqlalchemy import func as sa_func
             items_out = []
             for pl in playlists:
-                from sqlalchemy import func as sa_func
                 count_r = await session.execute(
                     select(sa_func.count(PlaylistItem.id)).where(PlaylistItem.playlist_id == pl.id)
                 )
+                # Newest 4 items in this playlist, then look up their
+                # thumbnail URLs from ArtistContent.
+                pi_r = await session.execute(
+                    select(PlaylistItem.content_id)
+                    .where(PlaylistItem.playlist_id == pl.id)
+                    .order_by(PlaylistItem.created_at.desc())
+                    .limit(4)
+                )
+                cids = [row[0] for row in pi_r.all() if row[0]]
+                thumbs = []
+                if cids:
+                    cr = await session.execute(
+                        select(ArtistContent.id, ArtistContent.thumbnail_url, ArtistContent.url)
+                        .where(ArtistContent.id.in_(cids))
+                    )
+                    thumb_by_id = {row[0]: (row[1] or row[2] or '') for row in cr.all()}
+                    # Preserve newest-first order from the PlaylistItem query.
+                    thumbs = [thumb_by_id.get(c, '') for c in cids]
                 items_out.append({
                     "id": pl.id, "name": pl.name,
                     "item_count": count_r.scalar() or 0,
                     "created_at": pl.created_at.strftime("%d.%m.%Y"),
+                    "thumbs": thumbs,
                 })
             return web.json_response({"playlists": items_out})
     except Exception as e:

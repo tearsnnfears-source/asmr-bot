@@ -12,7 +12,7 @@ from aiogram.types import LabeledPrice
 from sqlalchemy import select, text as sa_text, func as sa_func
 
 from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, assign_tier_badge, _auto_thumbnail
-from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, BOT_TOKENS, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_USDT_PRICES, CRYPTOCLOUD_API_KEY, CRYPTOCLOUD_SHOP_ID, CRYPTOCLOUD_SECRET, CRYPTOCLOUD_API_URL
+from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_USDT_PRICES, CRYPTOCLOUD_API_KEY, CRYPTOCLOUD_SHOP_ID, CRYPTOCLOUD_SECRET, CRYPTOCLOUD_API_URL
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +24,8 @@ MINIAPP_STARS_PLANS = {
 
 
 def validate_telegram_init_data(init_data: str) -> dict | None:
-    """Validate Telegram Mini App initData and return trusted user data.
-
-    Tries every configured bot token (BOT_TOKEN + optional TELEGRAM_BOT_TOKEN_2)
-    and accepts the initData if any of them produces the expected HMAC. Lets a
-    staging bot share this backend without standing up a second service.
-    """
-    if not init_data or not BOT_TOKENS:
+    """Validate Telegram Mini App initData and return trusted user data."""
+    if not init_data or not BOT_TOKEN:
         return None
 
     pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
@@ -47,25 +42,19 @@ def validate_telegram_init_data(init_data: str) -> dict | None:
     data_check_string = "\n".join(
         f"{key}={value}" for key, value in sorted(params.items())
     )
+    secret_key = hmac.new(
+        b"WebAppData",
+        BOT_TOKEN.encode(),
+        hashlib.sha256,
+    ).digest()
+    calculated_hash = hmac.new(
+        secret_key,
+        data_check_string.encode(),
+        hashlib.sha256,
+    ).hexdigest()
 
-    matched_token = None
-    for token in BOT_TOKENS:
-        secret_key = hmac.new(
-            b"WebAppData",
-            token.encode(),
-            hashlib.sha256,
-        ).digest()
-        calculated_hash = hmac.new(
-            secret_key,
-            data_check_string.encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        if hmac.compare_digest(calculated_hash, received_hash):
-            matched_token = token
-            break
-
-    if matched_token is None:
-        logger.warning("Invalid Telegram initData hash (none of %d tokens matched)", len(BOT_TOKENS))
+    if not hmac.compare_digest(calculated_hash, received_hash):
+        logger.warning("Invalid Telegram initData hash")
         return None
 
     try:

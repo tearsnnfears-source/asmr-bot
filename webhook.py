@@ -386,18 +386,28 @@ async def api_get_artists(request: web.Request) -> web.Response:
     async with async_session() as session:
         result = await session.execute(select(Artist).order_by(Artist.name))
         artists = result.scalars().all()
-        # Check which artists have profile content
         from sqlalchemy import func
         content_result = await session.execute(
             select(ArtistContent.artist_name, func.count(ArtistContent.id))
             .group_by(ArtistContent.artist_name)
         )
         artists_with_content = {row[0] for row in content_result.all() if row[1] > 0}
+        # Per-artist short count — Artist row only stores photos/videos, but
+        # the frontend wants to render a real "Shorts N" header before any
+        # paginated /artist_content fetch lands. Group ArtistContent by type.
+        short_result = await session.execute(
+            select(ArtistContent.artist_name, func.count(ArtistContent.id))
+            .where(ArtistContent.content_type == "short")
+            .group_by(ArtistContent.artist_name)
+        )
+        shorts_by_name = {row[0]: row[1] for row in short_result.all()}
         artists_data = [{
             "name": a.name, "photo_url": a.photo_url, "profile_photo_url": a.profile_photo_url,
             "topic_url": getattr(a, 'topic_url', None),
             "has_profile": a.name in artists_with_content,
-            "photos": a.photos, "videos": a.videos, "tag_hot": getattr(a, 'tag_hot', False),
+            "photos": a.photos, "videos": a.videos,
+            "shorts": shorts_by_name.get(a.name, 0),  # additive; old clients ignore.
+            "tag_hot": getattr(a, 'tag_hot', False),
             "tag_new": getattr(a, 'tag_new', False), "tag_prom": getattr(a, 'tag_prom', False),
             "tag_ready": getattr(a, 'tag_ready', False)
         } for a in artists]
@@ -671,7 +681,7 @@ async def api_get_artist_content(request: web.Request) -> web.Response:
     offset      = max(0, int(q.get("offset", 0)))
     tag_filter  = q.get("tag", "").strip()
 
-    LIMITS = {"video": 10, "short": 9, "photo": 24}
+    LIMITS = {"video": 10, "short": 9, "photo": 15}
 
     if not artist_name:
         return web.json_response({"error": "name required"}, status=400)

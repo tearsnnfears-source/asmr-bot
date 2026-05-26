@@ -1501,6 +1501,10 @@ async def api_get_favorites_v2(request: web.Request) -> web.Response:
                         "artist_name": c.artist_name,
                         "thumbnail_url": c.thumbnail_url or "",
                         "tags": c.tags or "",
+                        # New field — additive, safe for old clients (they
+                        # ignore it). New redesign uses this to split the
+                        # Saved tab into "Liked videos" vs "Liked shorts".
+                        "content_type": c.content_type or "",
                     })
                 items.append(item)
             return web.json_response({"items": items, "count": len(items), "limit": 200})

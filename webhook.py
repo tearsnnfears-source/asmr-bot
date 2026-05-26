@@ -1012,6 +1012,25 @@ async def cryptocloud_postback(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def api_get_video_by_id(request: web.Request) -> web.Response:
+    """GET /miniapp/video/{id} — single content row by id. Lets the frontend
+    open any video/short/photo without depending on whether it's in the
+    /miniapp/videos?limit=500 page — important once the catalog passes a few
+    thousand items."""
+    try:
+        cid = int(request.match_info.get("id", 0))
+    except Exception:
+        return web.json_response({"error": "Bad id"}, status=400)
+    if not cid:
+        return web.json_response({"error": "Bad id"}, status=400)
+    async with async_session() as session:
+        res = await session.execute(select(ArtistContent).where(ArtistContent.id == cid))
+        item = res.scalar_one_or_none()
+        if not item:
+            return web.json_response({"error": "Not found"}, status=404)
+        return web.json_response(_content_meta(item))
+
+
 async def api_post_view(request: web.Request) -> web.Response:
     """POST /miniapp/view {initData, content_id} — register one view.
     Counted at most once per (user, content) thanks to the content_views
@@ -1781,6 +1800,7 @@ def create_app() -> web.Application:
     app.router.add_get("/miniapp/artist_content", api_get_artist_content)
     app.router.add_post("/miniapp/content/play", api_content_play)
     app.router.add_post("/miniapp/view", api_post_view)
+    app.router.add_get("/miniapp/video/{id:[0-9]+}", api_get_video_by_id)
     app.router.add_post("/miniapp/cryptocloud/checkout", api_cryptocloud_checkout)
     app.router.add_post("/miniapp/cryptocloud/postback", cryptocloud_postback)
     app.router.add_post("/miniapp/watch_progress", api_watch_progress)

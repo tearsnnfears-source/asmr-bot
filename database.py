@@ -105,12 +105,16 @@ class ArtistContent(Base):
 
     id:            Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
     artist_name:   Mapped[str]      = mapped_column(String(128), index=True)
-    content_type:  Mapped[str]      = mapped_column(String(8))   # "video" | "photo"
+    content_type:  Mapped[str]      = mapped_column(String(8))   # "video" | "photo" | "short"
     title:         Mapped[str|None] = mapped_column(String(256), nullable=True)
     url:           Mapped[str]      = mapped_column(Text)
     thumbnail_url: Mapped[str|None] = mapped_column(Text, nullable=True)
     tags:          Mapped[str|None] = mapped_column(String(256), nullable=True)
     sort_order:    Mapped[int]      = mapped_column(Integer, default=0)
+    # Total view count — incremented by POST /miniapp/view after the user
+    # has watched at least 10s of the content. Tracked per user via
+    # ContentView to keep one human = one view.
+    views:         Mapped[int]      = mapped_column(Integer, default=0, nullable=False)
     created_at:    Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -233,7 +237,13 @@ async def init_db():
             "ALTER TABLE artist_content ADD COLUMN IF NOT EXISTS tags VARCHAR(256)",
             "ALTER TABLE artist_content ADD COLUMN IF NOT EXISTS sort_order INTEGER DEFAULT 0",
             "ALTER TABLE artist_content ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW()",
+            "ALTER TABLE artist_content ADD COLUMN IF NOT EXISTS views INTEGER NOT NULL DEFAULT 0",
             "CREATE INDEX IF NOT EXISTS idx_artist_content_name ON artist_content (artist_name)",
+            # One-view-per-user log so the same person doesn't pump up the
+            # counter by re-watching. POST /miniapp/view inserts ON CONFLICT
+            # DO NOTHING; counter increment runs only when an insert happens.
+            "CREATE TABLE IF NOT EXISTS content_views (telegram_id BIGINT, content_id INTEGER, watched_at TIMESTAMP DEFAULT NOW(), PRIMARY KEY (telegram_id, content_id))",
+            "CREATE INDEX IF NOT EXISTS idx_content_views_content ON content_views (content_id)",
             "CREATE TABLE IF NOT EXISTS tags (id SERIAL PRIMARY KEY, name VARCHAR(64) UNIQUE, color VARCHAR(16) DEFAULT '#FFFFFF', created_at TIMESTAMP DEFAULT NOW())",
             "CREATE TABLE IF NOT EXISTS video_reactions (id SERIAL PRIMARY KEY, content_id INTEGER, telegram_id BIGINT, emoji VARCHAR(8), created_at TIMESTAMP DEFAULT NOW())",
             "CREATE INDEX IF NOT EXISTS idx_reactions_content ON video_reactions (content_id)",

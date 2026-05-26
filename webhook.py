@@ -94,6 +94,7 @@ def _content_meta(item: ArtistContent, include_url: bool = False) -> dict:
         "sort_order": item.sort_order,
         "created_at": item.created_at.isoformat() if item.created_at else "",
         "content_type": item.content_type,
+        "views": getattr(item, "views", 0) or 0,
     }
     if include_url:
         data["url"] = item.url
@@ -1011,6 +1012,45 @@ async def cryptocloud_postback(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def api_post_view(request: web.Request) -> web.Response:
+    """POST /miniapp/view {initData, content_id} — register one view.
+    Counted at most once per (user, content) thanks to the content_views
+    composite primary key + ON CONFLICT DO NOTHING; we only bump the
+    aggregate ArtistContent.views counter when the insert actually wrote
+    a new row."""
+    try:
+        data = await request.json()
+        user_id = _parse_user_id(data.get("initData", ""))
+        content_id = data.get("content_id")
+        try: content_id = int(content_id)
+        except Exception: content_id = 0
+        if not user_id or not content_id:
+            return web.json_response({"error": "Missing data"}, status=400)
+        from sqlalchemy import text as _t
+        async with async_session() as session:
+            # Insert; rowcount tells us whether this user had already viewed.
+            res = await session.execute(
+                _t("INSERT INTO content_views (telegram_id, content_id) VALUES (:uid, :cid) "
+                   "ON CONFLICT DO NOTHING"),
+                {"uid": user_id, "cid": content_id}
+            )
+            counted = (res.rowcount or 0) > 0
+            if counted:
+                await session.execute(
+                    _t("UPDATE artist_content SET views = COALESCE(views, 0) + 1 WHERE id = :cid"),
+                    {"cid": content_id}
+                )
+            await session.commit()
+            v = await session.execute(
+                _t("SELECT views FROM artist_content WHERE id = :cid"),
+                {"cid": content_id}
+            )
+            views = v.scalar() or 0
+        return web.json_response({"ok": True, "counted": counted, "views": int(views)})
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
 async def api_get_shorts(request: web.Request) -> web.Response:
     """GET /miniapp/shorts?limit=20 — latest shorts for home page scroll"""
     try:
@@ -1740,6 +1780,7 @@ def create_app() -> web.Application:
     app.router.add_post("/miniapp/playlists/items", api_playlist_items)
     app.router.add_get("/miniapp/artist_content", api_get_artist_content)
     app.router.add_post("/miniapp/content/play", api_content_play)
+    app.router.add_post("/miniapp/view", api_post_view)
     app.router.add_post("/miniapp/cryptocloud/checkout", api_cryptocloud_checkout)
     app.router.add_post("/miniapp/cryptocloud/postback", cryptocloud_postback)
     app.router.add_post("/miniapp/watch_progress", api_watch_progress)

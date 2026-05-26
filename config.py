@@ -4,6 +4,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BOT_TOKEN       = os.getenv("BOT_TOKEN")
+# Optional secondary bot token. When set, validate_telegram_init_data will
+# accept initData signed by either BOT_TOKEN or TELEGRAM_BOT_TOKEN_2.
+# Used to let a staging bot share this backend without forking the service.
+BOT_TOKEN_2     = os.getenv("TELEGRAM_BOT_TOKEN_2", "")
+BOT_TOKENS      = [t for t in (BOT_TOKEN, BOT_TOKEN_2) if t]
 GROUP_ID        = int(os.getenv("GROUP_ID", "0"))
 INVITE_LINK     = os.getenv("INVITE_LINK", "")
 ADMIN_IDS       = list(map(int, os.getenv("ADMIN_IDS", "0").split(",")))

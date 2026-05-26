@@ -31,6 +31,11 @@ def validate_telegram_init_data(init_data: str) -> dict | None:
     pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
     params = dict(pairs)
     received_hash = params.pop("hash", None)
+    # Telegram added an Ed25519 'signature' field in 2024 — it's an additional
+    # signature, separate from the HMAC `hash`, and the docs require it to be
+    # excluded from the data-check-string. If we leave it in, hash never matches
+    # and validation silently fails with "Cannot parse user".
+    params.pop("signature", None)
     if not received_hash:
         return None
 

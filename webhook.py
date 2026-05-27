@@ -1012,6 +1012,77 @@ async def cryptocloud_postback(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok"})
 
 
+async def api_get_recommended(request: web.Request) -> web.Response:
+    """GET /miniapp/recommended?content_id=N&limit=8 — list of videos to play
+    next. Strategy: 2 latest from the same artist + the rest are videos that
+    share at least one tag with the source, excluding the source itself.
+    Falls back to latest videos overall if nothing else matches."""
+    q = request.rel_url.query
+    try:
+        cid = int(q.get('content_id', 0))
+    except Exception:
+        cid = 0
+    limit = max(1, min(20, int(q.get('limit', 8) or 8)))
+
+    async with async_session() as session:
+        # Load the source row to read its artist + tags.
+        source = None
+        if cid:
+            res = await session.execute(select(ArtistContent).where(ArtistContent.id == cid))
+            source = res.scalar_one_or_none()
+
+        picks = []
+        seen_ids = {cid} if cid else set()
+
+        # 2 latest from the same artist (excluding the source).
+        if source and source.artist_name:
+            same_artist = await session.execute(
+                select(ArtistContent)
+                .where(ArtistContent.artist_name == source.artist_name)
+                .where(ArtistContent.content_type == 'video')
+                .where(ArtistContent.id != cid)
+                .order_by(ArtistContent.created_at.desc())
+                .limit(2)
+            )
+            for v in same_artist.scalars().all():
+                if v.id in seen_ids: continue
+                seen_ids.add(v.id); picks.append(v)
+
+        # Tag-similar (any tag overlap). Cheap LIKE since tags are stored as
+        # a comma-separated string in this schema.
+        if source and source.tags:
+            from sqlalchemy import or_, func as _sf
+            tag_terms = [t.strip() for t in (source.tags or '').split(',') if t.strip()]
+            if tag_terms:
+                clauses = [ArtistContent.tags.ilike(f"%{t}%") for t in tag_terms[:4]]
+                sim = await session.execute(
+                    select(ArtistContent)
+                    .where(or_(*clauses))
+                    .where(ArtistContent.content_type == 'video')
+                    .where(ArtistContent.id != cid)
+                    .order_by(_sf.random())
+                    .limit(limit * 2)
+                )
+                for v in sim.scalars().all():
+                    if v.id in seen_ids: continue
+                    seen_ids.add(v.id); picks.append(v)
+                    if len(picks) >= limit: break
+
+        # Fallback: latest videos overall (excluding already-picked + source).
+        if len(picks) < limit:
+            q_latest = select(ArtistContent).where(ArtistContent.content_type == 'video')
+            if seen_ids:
+                q_latest = q_latest.where(~ArtistContent.id.in_(list(seen_ids)))
+            q_latest = q_latest.order_by(ArtistContent.created_at.desc()).limit(limit * 2)
+            latest = await session.execute(q_latest)
+            for v in latest.scalars().all():
+                if v.id in seen_ids: continue
+                seen_ids.add(v.id); picks.append(v)
+                if len(picks) >= limit: break
+
+        return web.json_response({"items": [_content_meta(v) for v in picks[:limit]]})
+
+
 async def api_get_video_by_id(request: web.Request) -> web.Response:
     """GET /miniapp/video/{id} — single content row by id. Lets the frontend
     open any video/short/photo without depending on whether it's in the
@@ -1825,6 +1896,7 @@ def create_app() -> web.Application:
     app.router.add_post("/miniapp/content/play", api_content_play)
     app.router.add_post("/miniapp/view", api_post_view)
     app.router.add_get("/miniapp/video/{id:[0-9]+}", api_get_video_by_id)
+    app.router.add_get("/miniapp/recommended", api_get_recommended)
     app.router.add_post("/miniapp/cryptocloud/checkout", api_cryptocloud_checkout)
     app.router.add_post("/miniapp/cryptocloud/postback", cryptocloud_postback)
     app.router.add_post("/miniapp/watch_progress", api_watch_progress)

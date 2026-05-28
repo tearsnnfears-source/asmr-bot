@@ -44,12 +44,12 @@ def validate_telegram_init_data(init_data: str) -> dict | None:
     if not received_hash:
         logger.warning("validate_init_data: no hash in initData")
         return None
-    # Newer Telegram clients (Bot API 7.10+) tack on a `signature` field
-    # used for Mini App auth. It must NOT be part of the data-check
-    # string — Telegram excludes it before computing the hash on their
-    # side too. Pop is a no-op for older clients that don't ship it.
+    # IMPORTANT: do NOT pop `signature`. The Telegram docs say
+    # "exclude signature from data_check_string", but in practice
+    # actual clients compute the hash WITH signature included. Popping
+    # it makes HMAC drift for any client on Bot API 7.10+. Confirmed
+    # by reproducing on the live miniapp twice; reverting fixes it.
     had_signature = "signature" in params
-    params.pop("signature", None)
 
     data_check_string = "\n".join(
         f"{key}={value}" for key, value in sorted(params.items())

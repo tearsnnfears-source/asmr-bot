@@ -9,7 +9,7 @@ from datetime import datetime as _dt, timedelta, timezone
 from aiohttp import ClientSession, ClientTimeout, web
 from aiogram import Bot
 from aiogram.types import LabeledPrice
-from sqlalchemy import select, text as sa_text, func as sa_func
+from sqlalchemy import select, text as sa_text, func as sa_func, or_ as sa_or
 
 from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, _auto_thumbnail
 from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_USDT_PRICES, CRYPTOCLOUD_API_KEY, CRYPTOCLOUD_SHOP_ID, CRYPTOCLOUD_SECRET, CRYPTOCLOUD_API_URL
@@ -669,15 +669,33 @@ async def api_free_trial(request: web.Request) -> web.Response:
         return web.json_response({"error": str(e)}, status=500)
 
 async def api_get_videos(request: web.Request) -> web.Response:
+    """GET /miniapp/videos?limit=N — full video catalog, newest first.
+
+    The CSV `tags` column can carry a 'shorts' label even on a
+    content_type='video' row (legacy ingest, repeats of shorts on the
+    long-form catalog). We hide those here so the redesign's Home feed
+    matches what /miniapp/tags already does for the Browse rail.
+    """
     try:
         limit = int(request.query.get('limit', 500))
         async with async_session() as session:
-            result = await session.execute(
+            q = (
                 select(ArtistContent)
                 .where(ArtistContent.content_type == "video")
+                # Exclude rows tagged with 'shorts' anywhere in the CSV.
+                # tags can be NULL, 'shorts', 'shorts,whisper', 'sleep, shorts'
+                # — the case-insensitive LIKE catches all three. NULL rows
+                # pass through unaffected.
+                .where(
+                    sa_or(
+                        ArtistContent.tags.is_(None),
+                        ~ArtistContent.tags.ilike('%shorts%'),
+                    )
+                )
                 .order_by(ArtistContent.created_at.desc())
                 .limit(limit)
             )
+            result = await session.execute(q)
             videos = result.scalars().all()
             videos_data = [_content_meta(v) for v in videos]
             return web.json_response({"videos": videos_data, "total": len(videos_data)})

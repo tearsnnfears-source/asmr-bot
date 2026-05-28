@@ -675,9 +675,14 @@ async def api_get_videos(request: web.Request) -> web.Response:
     content_type='video' row (legacy ingest, repeats of shorts on the
     long-form catalog). We hide those here so the redesign's Home feed
     matches what /miniapp/tags already does for the Browse rail.
+    Supports paging via ?offset=N&limit=M so the redesign Home can
+    stream the catalog in 30-row chunks instead of blocking on a
+    multi-second response. The two miniapps stay compatible: omitting
+    offset defaults to 0, matching the old behaviour.
     """
     try:
-        limit = int(request.query.get('limit', 500))
+        limit  = int(request.query.get('limit', 500))
+        offset = max(0, int(request.query.get('offset', 0)))
         async with async_session() as session:
             q = (
                 select(ArtistContent)
@@ -693,12 +698,18 @@ async def api_get_videos(request: web.Request) -> web.Response:
                     )
                 )
                 .order_by(ArtistContent.created_at.desc())
+                .offset(offset)
                 .limit(limit)
             )
             result = await session.execute(q)
             videos = result.scalars().all()
             videos_data = [_content_meta(v) for v in videos]
-            return web.json_response({"videos": videos_data, "total": len(videos_data)})
+            return web.json_response({
+                "videos": videos_data,
+                "total":  len(videos_data),
+                "offset": offset,
+                "limit":  limit,
+            })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 

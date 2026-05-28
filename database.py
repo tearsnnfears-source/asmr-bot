@@ -628,6 +628,25 @@ async def consume_pending_invite(session: AsyncSession, telegram_id: int) -> str
     return invite.invite_link
 
 
+async def get_latest_invite(session: AsyncSession, telegram_id: int) -> str | None:
+    """Newest invite link for a user — including already-used ones.
+
+    Powers the redesign's persistent "your page link" affordance in the
+    AppHeader bell. Unlike consume_pending_invite, this read-only helper
+    never mutates the row, so the link stays available for the whole
+    subscription lifetime.
+    """
+    from sqlalchemy import select
+    result = await session.execute(
+        select(PendingInvite)
+        .where(PendingInvite.telegram_id == telegram_id)
+        .order_by(PendingInvite.created_at.desc())
+        .limit(1)
+    )
+    invite = result.scalar_one_or_none()
+    return invite.invite_link if invite else None
+
+
 # ─── Reaction CRUD ────────────────────────────────────────────────────────────
 
 ALLOWED_REACTIONS = ["🔥","❤️","👅","💦","😍","🥵","🫦","😮","🤤","💤","😴","✨","🎧","💋","🤫"]

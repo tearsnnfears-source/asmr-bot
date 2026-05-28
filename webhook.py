@@ -11,7 +11,7 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select, text as sa_text, func as sa_func
 
-from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, assign_tier_badge, _auto_thumbnail
+from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, _auto_thumbnail
 from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_USDT_PRICES, CRYPTOCLOUD_API_KEY, CRYPTOCLOUD_SHOP_ID, CRYPTOCLOUD_SECRET, CRYPTOCLOUD_API_URL
 
 logger = logging.getLogger(__name__)
@@ -380,6 +380,27 @@ async def api_check_invite(request: web.Request) -> web.Response:
         return web.json_response({"invite_link": link})
     except Exception as e:
         logger.error(f"check_invite error: {e}")
+        return web.json_response({"invite_link": None})
+
+
+async def api_my_invite(request: web.Request) -> web.Response:
+    """POST /miniapp/my_invite — newest invite link without consuming.
+
+    The redesign's AppHeader bell taps into this so the link stays
+    available even after the auto-opened modal has been dismissed.
+    Read-only: rows are never marked used here.
+    """
+    try:
+        data = await request.json()
+        user_data = validate_telegram_init_data(data.get("initData", ""))
+        if not user_data:
+            return web.json_response({"invite_link": None})
+        user_id = user_data["user_id"]
+        async with async_session() as session:
+            link = await get_latest_invite(session, int(user_id))
+        return web.json_response({"invite_link": link})
+    except Exception as e:
+        logger.error(f"my_invite error: {e}")
         return web.json_response({"invite_link": None})
 
 
@@ -1396,11 +1417,13 @@ async def api_get_tags(request: web.Request) -> web.Response:
                 t = t.strip()
                 if t:
                     counts[t] = counts.get(t, 0) + 1
+        # Технический тег "shorts" не нужен в Browse — он не описывает
+        # содержимое, а лишь дублирует content_type. Прячем его из ответа.
         out = [{
             "name":  t.name,
             "color": t.color,
             "count": counts.get(t.name, 0),
-        } for t in tags]
+        } for t in tags if t.name.strip().lower() != 'shorts']
         out.sort(key=lambda x: (-x["count"], x["name"]))
         return web.json_response({"tags": out})
 
@@ -1900,6 +1923,7 @@ def create_app() -> web.Application:
     app.router.add_post("/tribute-webhook", tribute_webhook)
     app.router.add_post("/miniapp/create_stars_invoice", api_create_stars_invoice)
     app.router.add_post("/miniapp/check_invite", api_check_invite)
+    app.router.add_post("/miniapp/my_invite", api_my_invite)
     app.router.add_get("/miniapp/artists", api_get_artists)
     app.router.add_get("/miniapp/videos", api_get_videos)
     app.router.add_get("/miniapp/custom_badges", api_get_custom_badges)

@@ -1370,12 +1370,39 @@ async def api_user_stats(request: web.Request) -> web.Response:
 
 
 async def api_get_tags(request: web.Request) -> web.Response:
-    """GET /miniapp/tags — все теги с цветами"""
+    """GET /miniapp/tags — все теги с цветами и счётчиком видео.
+
+    Каждый тег теперь возвращается с полем `count` = сколько единиц
+    контента (видео + шортсы) ссылаются на этот тег. Список отсортирован
+    по count DESC, потом по name ASC — самый популярный тег (Licking
+    и т.п.) первым. Старые клиенты, которые читают только name/color,
+    дополнительное поле просто игнорируют — обратная совместимость
+    сохранена.
+    """
+    from sqlalchemy import text as _t
     async with async_session() as session:
         tags = await get_all_tags(session)
-        return web.json_response({
-            "tags": [{"name": t.name, "color": t.color} for t in tags]
-        })
+        # Парсим CSV из artist_content.tags для видео и шортсов и
+        # собираем словарь tag → count. Один и тот же паттерн
+        # используется в handlers/admin.py для статистики.
+        tag_rows = (await session.execute(_t(
+            "SELECT tags FROM artist_content "
+            "WHERE content_type IN ('video', 'short') "
+            "AND tags IS NOT NULL AND tags != ''"
+        ))).scalars().all()
+        counts: dict[str, int] = {}
+        for tags_str in tag_rows:
+            for t in tags_str.split(','):
+                t = t.strip()
+                if t:
+                    counts[t] = counts.get(t, 0) + 1
+        out = [{
+            "name":  t.name,
+            "color": t.color,
+            "count": counts.get(t.name, 0),
+        } for t in tags]
+        out.sort(key=lambda x: (-x["count"], x["name"]))
+        return web.json_response({"tags": out})
 
 
 async def api_get_video_reactions(request: web.Request) -> web.Response:

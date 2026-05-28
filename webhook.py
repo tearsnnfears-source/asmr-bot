@@ -25,18 +25,24 @@ MINIAPP_STARS_PLANS = {
 
 def validate_telegram_init_data(init_data: str) -> dict | None:
     """Validate Telegram Mini App initData and return trusted user data."""
-    if not init_data or not BOT_TOKEN:
+    if not init_data:
+        logger.warning("validate_init_data: empty initData")
+        return None
+    if not BOT_TOKEN:
+        logger.warning("validate_init_data: BOT_TOKEN env is empty!")
         return None
 
     pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
     params = dict(pairs)
     received_hash = params.pop("hash", None)
     if not received_hash:
+        logger.warning("validate_init_data: no hash in initData")
         return None
     # Newer Telegram clients (Bot API 7.10+) tack on a `signature` field
     # used for Mini App auth. It must NOT be part of the data-check
     # string — Telegram excludes it before computing the hash on their
     # side too. Pop is a no-op for older clients that don't ship it.
+    had_signature = "signature" in params
     params.pop("signature", None)
 
     data_check_string = "\n".join(
@@ -54,7 +60,18 @@ def validate_telegram_init_data(init_data: str) -> dict | None:
     ).hexdigest()
 
     if not hmac.compare_digest(calculated_hash, received_hash):
-        logger.warning("Invalid Telegram initData hash")
+        # Show the first 6 chars of the bot token so we can verify which
+        # bot's secret is sitting in env. Never log the full token.
+        bot_prefix = BOT_TOKEN.split(":", 1)[0] if ":" in BOT_TOKEN else BOT_TOKEN[:6]
+        logger.warning(
+            "validate_init_data: HMAC mismatch. bot_token_id=%s had_signature=%s "
+            "received=%s... calculated=%s... fields=%s",
+            bot_prefix,
+            had_signature,
+            received_hash[:8],
+            calculated_hash[:8],
+            sorted(params.keys()),
+        )
         return None
 
     try:

@@ -1364,7 +1364,16 @@ async def api_get_follows(request: web.Request) -> web.Response:
 
 
 async def api_followed_feed(request: web.Request) -> web.Response:
-    """POST /miniapp/followed_feed — recent videos from followed artists"""
+    """POST /miniapp/followed_feed — random videos from followed artists.
+
+    The redesign's Home rail wanted a varied sample (so the same drop
+    doesn't sit on top every refresh), not strictly the newest 20.
+    ORDER BY RANDOM() shuffles per-request — cheap enough at the
+    artist_content scale we're running.
+
+    Filters out shorts-tagged rows like /miniapp/videos does, so the
+    rail mirrors what the user sees elsewhere in the app.
+    """
     user_data = await parse_init_data(request)
     if not user_data:
         return web.json_response({"error": "Invalid request"}, status=400)
@@ -1379,8 +1388,9 @@ async def api_followed_feed(request: web.Request) -> web.Response:
               AND ac.artist_name IN (
                 SELECT artist_name FROM artist_follows WHERE telegram_id = :uid
               )
-            ORDER BY ac.created_at DESC
-            LIMIT 20
+              AND (ac.tags IS NULL OR ac.tags NOT ILIKE '%shorts%')
+            ORDER BY RANDOM()
+            LIMIT 30
         """), {"uid": user_id})
         rows = result.mappings().all()
     return web.json_response({"videos": [

@@ -28,8 +28,14 @@ def validate_telegram_init_data(init_data: str) -> dict | None:
     if not init_data:
         logger.warning("validate_init_data: empty initData")
         return None
-    if not BOT_TOKEN:
-        logger.warning("validate_init_data: BOT_TOKEN env is empty!")
+    # Defensive strip — Railway Variables UI is famous for letting a
+    # stray '\n' or trailing space sneak in when you paste a bot token.
+    # Telegram's HMAC is computed from the clean token, so any
+    # invisible whitespace makes the calculated hash drift from
+    # received and every request fails with "Cannot parse user".
+    bot_token = (BOT_TOKEN or "").strip()
+    if not bot_token:
+        logger.warning("validate_init_data: BOT_TOKEN env is empty (or only whitespace)!")
         return None
 
     pairs = urllib.parse.parse_qsl(init_data, keep_blank_values=True)
@@ -50,7 +56,7 @@ def validate_telegram_init_data(init_data: str) -> dict | None:
     )
     secret_key = hmac.new(
         b"WebAppData",
-        BOT_TOKEN.encode(),
+        bot_token.encode(),
         hashlib.sha256,
     ).digest()
     calculated_hash = hmac.new(
@@ -62,15 +68,20 @@ def validate_telegram_init_data(init_data: str) -> dict | None:
     if not hmac.compare_digest(calculated_hash, received_hash):
         # Show the first 6 chars of the bot token so we can verify which
         # bot's secret is sitting in env. Never log the full token.
-        bot_prefix = BOT_TOKEN.split(":", 1)[0] if ":" in BOT_TOKEN else BOT_TOKEN[:6]
+        bot_prefix = bot_token.split(":", 1)[0] if ":" in bot_token else bot_token[:6]
+        # Flag silently-suspicious whitespace too — helps spot the
+        # paste-from-BotFather-with-trailing-newline footgun.
+        env_len = len(BOT_TOKEN or "")
+        clean_len = len(bot_token)
         logger.warning(
             "validate_init_data: HMAC mismatch. bot_token_id=%s had_signature=%s "
-            "received=%s... calculated=%s... fields=%s",
+            "received=%s... calculated=%s... fields=%s env_len=%d clean_len=%d",
             bot_prefix,
             had_signature,
             received_hash[:8],
             calculated_hash[:8],
             sorted(params.keys()),
+            env_len, clean_len,
         )
         return None
 

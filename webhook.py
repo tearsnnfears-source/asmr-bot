@@ -33,6 +33,11 @@ def validate_telegram_init_data(init_data: str) -> dict | None:
     received_hash = params.pop("hash", None)
     if not received_hash:
         return None
+    # Newer Telegram clients (Bot API 7.10+) tack on a `signature` field
+    # used for Mini App auth. It must NOT be part of the data-check
+    # string — Telegram excludes it before computing the hash on their
+    # side too. Pop is a no-op for older clients that don't ship it.
+    params.pop("signature", None)
 
     data_check_string = "\n".join(
         f"{key}={value}" for key, value in sorted(params.items())

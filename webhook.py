@@ -742,13 +742,19 @@ async def api_get_videos(request: web.Request) -> web.Response:
                 )
             )
             if order == 'random':
-                # md5(id||seed) gives a deterministic shuffle per seed —
-                # pagination over the same seed yields disjoint pages,
-                # so the user never sees a duplicate while scrolling.
-                # A new seed (fresh app open) gets a brand new order.
-                q = q.order_by(sa_func.md5(
-                    sa_func.concat(ArtistContent.id, sa_text(":seed:"), str(seed))
-                ))
+                # md5(id::text || seed) gives a deterministic shuffle per
+                # seed — pagination over the same seed yields disjoint
+                # pages, so the user never sees a duplicate while
+                # scrolling. A new seed (fresh app open) gets a brand
+                # new order. seed is a server-supplied int — no
+                # injection risk — but we still bind it as a parameter
+                # for safety.
+                from sqlalchemy import bindparam
+                q = q.order_by(
+                    sa_text("md5(id::text || :__shuffle_seed)").bindparams(
+                        __shuffle_seed=str(seed)
+                    )
+                )
             else:
                 q = q.order_by(ArtistContent.created_at.desc())
             q = q.offset(offset).limit(limit)

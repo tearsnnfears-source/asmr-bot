@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import logging
 import json
+import os
 import time
 import urllib.parse
 import uuid as _uuid_mod
@@ -11,8 +12,9 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select, text as sa_text, func as sa_func, or_ as sa_or
 
-from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, _auto_thumbnail
-from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_USDT_PRICES, CRYPTOCLOUD_API_KEY, CRYPTOCLOUD_SHOP_ID, CRYPTOCLOUD_SECRET, CRYPTOCLOUD_API_URL
+from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, apply_external_grant, _auto_thumbnail
+from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, TRIBUTE_ELITE_URL, CRYPTO_USDT_PRICES, CRYPTOCLOUD_API_KEY, CRYPTOCLOUD_SHOP_ID, CRYPTOCLOUD_SECRET, CRYPTOCLOUD_API_URL, INTERNAL_GRANT_SECRET, ELITE_SYNC_DAYS, TRIBUTE_ELITE_MIN_EUR
+from utils.sync import send_peer_elite_grant
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,7 @@ INIT_DATA_MAX_AGE_SECONDS = 24 * 60 * 60
 MINIAPP_STARS_PLANS = {
     "plus": {"days": 31, "stars": STARS_TIER_PRICES["plus"]},
     "pro": {"days": 31, "stars": STARS_TIER_PRICES["pro"]},
+    "elite": {"days": 31, "stars": STARS_TIER_PRICES["elite"]},
 }
 
 
@@ -112,6 +115,93 @@ def _parse_user_id(init_data: str) -> int | None:
     return user_data["user_id"] if user_data else None
 
 
+# ─── Telegram Login Widget (web auth, used by the standalone Android
+# WebView wrapper where window.Telegram.WebApp.initData is unavailable) ───
+def validate_telegram_login_widget(payload: dict) -> dict | None:
+    """Validate the hash returned by Telegram's Login Widget.
+
+    Auth flow on the site is: user taps 'Login with Telegram' button →
+    Telegram redirects with id/first_name/username/photo_url/auth_date/hash
+    → backend validates hash here, mints a JWT, returns it to the SPA.
+
+    Hash algorithm differs from Mini App initData (despite both being
+    Telegram-authored): secret = sha256(bot_token) (NOT
+    hmac(bot_token, 'WebAppData')). Data check string is the same
+    sorted key=value\\n format.
+    """
+    if not payload or not BOT_TOKEN:
+        return None
+    received_hash = payload.get("hash")
+    if not received_hash:
+        return None
+    pairs = {k: v for k, v in payload.items() if k != "hash" and v is not None and v != ""}
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+    bot_token = (BOT_TOKEN or "").strip()
+    secret_key = hashlib.sha256(bot_token.encode()).digest()
+    calc = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(calc, str(received_hash)):
+        logger.warning("Login Widget HMAC mismatch")
+        return None
+    # auth_date must be recent (Telegram recommends ≤ 1 day) so a leaked
+    # widget payload can't be replayed forever.
+    try:
+        auth_date = int(payload.get("auth_date", "0"))
+    except (TypeError, ValueError):
+        return None
+    if auth_date <= 0 or time.time() - auth_date > 86400:
+        logger.warning("Login Widget payload expired")
+        return None
+    try:
+        user_id = int(payload.get("id"))
+    except (TypeError, ValueError):
+        return None
+    return {
+        "user_id": user_id,
+        "first_name": payload.get("first_name") or "",
+        "username":   payload.get("username")   or "",
+        "photo_url":  payload.get("photo_url")  or "",
+    }
+
+
+# JWT secret: dedicated env var if set, otherwise derive from BOT_TOKEN
+# so we never run with an empty/predictable secret.
+def _jwt_secret() -> str:
+    explicit = os.getenv("JWT_SECRET", "").strip()
+    if explicit:
+        return explicit
+    bot = (BOT_TOKEN or "").strip()
+    # SHA-256 of the bot token — stable, server-side-only, never exposed.
+    return hashlib.sha256(("jwt:" + bot).encode()).hexdigest()
+
+
+def _mint_session_jwt(user_id: int) -> str:
+    import jwt as _jwt
+    payload = {
+        "uid": int(user_id),
+        "iat": int(time.time()),
+        "exp": int(time.time()) + 60 * 60 * 24 * 30,  # 30 days
+    }
+    return _jwt.encode(payload, _jwt_secret(), algorithm="HS256")
+
+
+def _user_id_from_bearer(request: web.Request) -> int | None:
+    """Pull user_id out of an Authorization: Bearer <jwt> header. Returns
+    None if there's no header or the token is invalid/expired."""
+    import jwt as _jwt
+    auth = request.headers.get("Authorization", "")
+    if not auth.lower().startswith("bearer "):
+        return None
+    token = auth.split(" ", 1)[1].strip()
+    if not token:
+        return None
+    try:
+        claims = _jwt.decode(token, _jwt_secret(), algorithms=["HS256"])
+        uid = int(claims.get("uid") or 0)
+        return uid if uid > 0 else None
+    except Exception:
+        return None
+
+
 def _content_meta(item: ArtistContent, include_url: bool = False) -> dict:
     thumbnail_url = item.thumbnail_url or _auto_thumbnail(item.url) or ""
     # Photos are their own thumbnails — fall back to the image URL itself
@@ -170,6 +260,109 @@ async def _create_group_invite_for_user(telegram_id: int, store_pending: bool = 
     return invite_link
 
 
+def _internal_grant_authorized(request: web.Request) -> bool:
+    if not INTERNAL_GRANT_SECRET:
+        return False
+    auth = request.headers.get("Authorization", "")
+    bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    header_secret = request.headers.get("X-Internal-Grant-Secret", "").strip()
+    return (
+        bool(bearer and hmac.compare_digest(bearer, INTERNAL_GRANT_SECRET))
+        or bool(header_secret and hmac.compare_digest(header_secret, INTERNAL_GRANT_SECRET))
+    )
+
+
+async def internal_grant_access(request: web.Request) -> web.Response:
+    """Receive an idempotent ELITE access grant from the paired bot."""
+    if not INTERNAL_GRANT_SECRET:
+        return web.json_response({"error": "Internal grants are not configured"}, status=503)
+    if not _internal_grant_authorized(request):
+        return web.json_response({"error": "Forbidden"}, status=403)
+
+    try:
+        data = await request.json()
+        telegram_id = int(data.get("telegram_id", 0))
+        days = int(data.get("days") or ELITE_SYNC_DAYS)
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    source_project = str(data.get("source_project") or "external").strip()
+    order_uuid = str(data.get("order_uuid") or "").strip()
+    tier = str(data.get("tier") or "elite").lower()
+    username = (data.get("username") or "").strip() or None
+    full_name = (data.get("full_name") or "").strip() or None
+
+    if not telegram_id or not order_uuid:
+        return web.json_response({"error": "telegram_id and order_uuid are required"}, status=400)
+    if tier != "elite":
+        return web.json_response({"error": "Only ELITE cross-grants are enabled"}, status=400)
+
+    async with async_session() as session:
+        applied, user = await apply_external_grant(
+            session,
+            source_project=source_project,
+            order_uuid=order_uuid,
+            telegram_id=telegram_id,
+            days=days,
+            tier=tier,
+            username=username,
+            full_name=full_name,
+        )
+        total = user.units or 0
+        lang = user.lang or "en"
+
+    if applied:
+        invite_link = await _create_group_invite_for_user(telegram_id, store_pending=True)
+    else:
+        async with async_session() as session:
+            invite_link = await get_latest_invite(session, telegram_id)
+        invite_link = invite_link or INVITE_LINK
+
+    if applied:
+        nick = f"@{username}" if username else f"id{telegram_id}"
+        await _notify_admins(
+            f"<b>ELITE sync grant received</b>\n"
+            f"Source: <code>{source_project}</code>\n"
+            f"Order: <code>{order_uuid}</code>\n"
+            f"User: {nick} | <code>{telegram_id}</code>\n"
+            f"+{days} days | Total: {total} days"
+        )
+
+        if invite_link:
+            bot = Bot(token=BOT_TOKEN)
+            try:
+                from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                text = (
+                    "<b>ELITE access activated for ASMR Leaks.</b>\n\n"
+                    f"Added: <b>{days} days</b>\n"
+                    f"Total: <b>{total} days</b>\n\n"
+                    "Use the button below to join the private group."
+                )
+                if lang == "ru":
+                    text = (
+                        "<b>ELITE доступ ASMR Leaks активирован.</b>\n\n"
+                        f"Добавлено: <b>{days} дней</b>\n"
+                        f"Всего: <b>{total} дней</b>\n\n"
+                        "Нажмите кнопку ниже, чтобы вступить в закрытую группу."
+                    )
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Join ASMR Leaks", url=invite_link)]
+                ])
+                await bot.send_message(telegram_id, text, parse_mode="HTML", reply_markup=kb)
+            except Exception as exc:
+                logger.info("Cannot DM synced user %s yet: %s", telegram_id, exc)
+            finally:
+                await bot.session.close()
+
+    return web.json_response({
+        "ok": True,
+        "applied": applied,
+        "telegram_id": telegram_id,
+        "days_left": total,
+        "invite_link": invite_link,
+    })
+
+
 async def forward_tribute_webhook(body: bytes, signature: str) -> None:
     if not TRIBUTE_SITE_WEBHOOK_URL:
         return
@@ -194,15 +387,19 @@ async def forward_tribute_webhook(body: bytes, signature: str) -> None:
 
 @web.middleware
 async def cors_middleware(request, handler):
+    # Authorization header had to be added to the allow-list so the
+    # WebView wrapper (Bearer JWT) and any other web caller can attach
+    # it on cross-origin requests.
     if request.method == 'OPTIONS':
         response = web.Response()
-        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Origin']  = '*'
         response.headers['Access-Control-Allow-Methods'] = 'POST, GET, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
         return response
-    
+
     response = await handler(request)
-    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Origin']  = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return response
 
 async def tribute_webhook(request: web.Request) -> web.Response:
@@ -250,7 +447,9 @@ async def tribute_webhook(request: web.Request) -> web.Response:
 
             # ELITE никогда не выдаётся автоматом — только админом вручную.
             # Tribute может проставить только PLUS или PRO.
-            if amount_eur >= 7.0:
+            if amount_eur >= TRIBUTE_ELITE_MIN_EUR:
+                new_tier = 'elite'
+            elif amount_eur >= 7.0:
                 new_tier = 'pro'
             else:
                 new_tier = 'plus'
@@ -297,6 +496,15 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         # Уведомление админу о Tribute оплате
         username = payload.get("telegram_username", "")
         nick = f"@{username}" if username else f"id{telegram_id}"
+        if new_tier == "elite":
+            tribute_order_uuid = f"tribute:{hashlib.sha256(body).hexdigest()[:24]}"
+            await send_peer_elite_grant(
+                telegram_id=telegram_id,
+                order_uuid=tribute_order_uuid,
+                username=username or None,
+                days=TRIBUTE_DAYS,
+                tier=new_tier,
+            )
         await _notify_admins(
             f"💳 <b>Новая оплата — Tribute</b>\n"
             f"👤 {nick} | <code>{telegram_id}</code>\n"
@@ -349,12 +557,60 @@ async def tribute_webhook(request: web.Request) -> web.Response:
 
 
 async def parse_init_data(request: web.Request) -> dict:
+    """Authorize a request. Accepts BOTH:
+      · Authorization: Bearer <jwt>  — used by the Android WebView wrapper
+        / standalone web (Login Widget flow). Minted by /auth/telegram_login.
+      · {"initData": "..."} in the JSON body — used by the in-Telegram
+        Mini App (raw Telegram WebApp initData string).
+
+    Returns {user_id, ...} on success, None otherwise.
+    Bearer header is checked first so the Android app doesn't need to
+    fake an initData payload.
+    """
+    uid = _user_id_from_bearer(request)
+    if uid:
+        return {"user_id": uid, "init_data": "", "params": {}, "user": {}}
     try:
         data = await request.json()
         init_data = data.get("initData", "")
         return validate_telegram_init_data(init_data)
-    except:
+    except Exception:
         return None
+
+
+async def api_telegram_login(request: web.Request) -> web.Response:
+    """POST /miniapp/auth/telegram_login  body: { id, first_name, last_name,
+    username, photo_url, auth_date, hash } — payload received from the
+    Telegram Login Widget on the standalone website. Validates the hash,
+    upserts the user row, returns { jwt, user_id }.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        return web.json_response({"error": "Bad body"}, status=400)
+    auth = validate_telegram_login_widget(payload or {})
+    if not auth:
+        return web.json_response({"error": "Invalid login payload"}, status=403)
+    user_id = auth["user_id"]
+    # Touch the user row so name / username stays fresh for the rest of
+    # the app. Lifetime/days/tier untouched.
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.telegram_id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            user = User(
+                telegram_id=user_id,
+                username=auth["username"] or None,
+                full_name=auth["first_name"] or None,
+            )
+            session.add(user)
+        else:
+            if auth["username"]: user.username = auth["username"]
+            if auth["first_name"]:
+                user.full_name = auth["first_name"]
+        await session.commit()
+    token = _mint_session_jwt(user_id)
+    return web.json_response({"jwt": token, "user_id": user_id})
 
 async def api_create_stars_invoice(request: web.Request) -> web.Response:
     user_data = await parse_init_data(request)
@@ -495,6 +751,7 @@ async def api_get_profile(request: web.Request) -> web.Response:
                 "tier": getattr(user, 'tier', 'plus') or 'plus',
                 "tribute_plus_url": TRIBUTE_PLUS_URL,
                 "tribute_pro_url": TRIBUTE_PRO_URL,
+                "tribute_elite_url": TRIBUTE_ELITE_URL,
             })
     except Exception as e:
         logger.error(f"Error in api_get_profile: {e}")
@@ -1080,6 +1337,14 @@ async def cryptocloud_postback(request: web.Request) -> web.Response:
         await session.commit()
         new_total = user.units
         lang      = user.lang or "en"
+
+    if tier == "elite":
+        await send_peer_elite_grant(
+            telegram_id=telegram_id,
+            order_uuid=f"crypto:{order_id}",
+            days=31,
+            tier=tier,
+        )
 
     nick = f"id{telegram_id}"
     await _notify_admins(
@@ -2018,10 +2283,12 @@ def create_app() -> web.Application:
     app = web.Application()
     app.middlewares.append(cors_middleware)
     app.router.add_get("/health", api_health)
+    app.router.add_post("/internal/grant_access", internal_grant_access)
     app.router.add_post("/tribute-webhook", tribute_webhook)
     app.router.add_post("/miniapp/create_stars_invoice", api_create_stars_invoice)
     app.router.add_post("/miniapp/check_invite", api_check_invite)
     app.router.add_post("/miniapp/my_invite", api_my_invite)
+    app.router.add_post("/miniapp/auth/telegram_login", api_telegram_login)
     app.router.add_get("/miniapp/artists", api_get_artists)
     app.router.add_get("/miniapp/videos", api_get_videos)
     app.router.add_get("/miniapp/custom_badges", api_get_custom_badges)

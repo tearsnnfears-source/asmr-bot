@@ -716,6 +716,16 @@ async def api_get_videos(request: web.Request) -> web.Response:
     try:
         limit  = int(request.query.get('limit', 500))
         offset = max(0, int(request.query.get('offset', 0)))
+        # New: ?order=random&seed=<int> gives a pseudo-shuffled view of
+        # the whole catalog (not just newest), stable across pages for
+        # one seed so offset paging still works. Used by the redesign
+        # Home "For you" feed to surface old artists, not just today's
+        # uploads.
+        order  = request.query.get('order', 'newest').lower()
+        try:
+            seed = int(request.query.get('seed', 0))
+        except (TypeError, ValueError):
+            seed = 0
         async with async_session() as session:
             q = (
                 select(ArtistContent)
@@ -730,10 +740,18 @@ async def api_get_videos(request: web.Request) -> web.Response:
                         ~ArtistContent.tags.ilike('%shorts%'),
                     )
                 )
-                .order_by(ArtistContent.created_at.desc())
-                .offset(offset)
-                .limit(limit)
             )
+            if order == 'random':
+                # md5(id||seed) gives a deterministic shuffle per seed —
+                # pagination over the same seed yields disjoint pages,
+                # so the user never sees a duplicate while scrolling.
+                # A new seed (fresh app open) gets a brand new order.
+                q = q.order_by(sa_func.md5(
+                    sa_func.concat(ArtistContent.id, sa_text(":seed:"), str(seed))
+                ))
+            else:
+                q = q.order_by(ArtistContent.created_at.desc())
+            q = q.offset(offset).limit(limit)
             result = await session.execute(q)
             videos = result.scalars().all()
             videos_data = [_content_meta(v) for v in videos]
@@ -742,6 +760,8 @@ async def api_get_videos(request: web.Request) -> web.Response:
                 "total":  len(videos_data),
                 "offset": offset,
                 "limit":  limit,
+                "order":  order,
+                "seed":   seed if order == 'random' else 0,
             })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)

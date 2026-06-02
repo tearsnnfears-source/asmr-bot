@@ -70,3 +70,4 @@ CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY", "")
 CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID", "")
 CRYPTOCLOUD_SECRET  = os.getenv("CRYPTOCLOUD_SECRET", "")  # HS256 secret for postback JWT verification
 CRYPTOCLOUD_API_URL = os.getenv("CRYPTOCLOUD_API_URL", "https://api.cryptocloud.plus/v2/invoice/create")
+CRYPTOCLOUD_INFO_URL = os.getenv("CRYPTOCLOUD_INFO_URL", "https://api.cryptocloud.plus/v2/invoice/merchant/info")

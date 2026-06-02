@@ -12,7 +12,7 @@ from aiogram.types import LabeledPrice
 from sqlalchemy import select, text as sa_text, func as sa_func, or_ as sa_or
 
 from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, _auto_thumbnail
-from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_USDT_PRICES, CRYPTOCLOUD_API_KEY, CRYPTOCLOUD_SHOP_ID, CRYPTOCLOUD_SECRET, CRYPTOCLOUD_API_URL
+from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_USDT_PRICES, CRYPTOCLOUD_API_KEY, CRYPTOCLOUD_SHOP_ID, CRYPTOCLOUD_SECRET, CRYPTOCLOUD_API_URL, CRYPTOCLOUD_INFO_URL
 
 logger = logging.getLogger(__name__)
 
@@ -874,6 +874,322 @@ async def api_content_play(request: web.Request) -> web.Response:
 
 # ─── Cryptocloud (hosted crypto checkout) ─────────────────────────────────────
 
+CRYPTOCLOUD_PAID_STATUSES = {"paid", "overpaid"}
+CRYPTOCLOUD_SUCCESS_STATUSES = {"success"}
+
+
+def _safe_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _dict_get_any(data: dict, *keys: str):
+    for key in keys:
+        value = data.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _cryptocloud_invoice_ref(value: str | None) -> str:
+    """Return a CryptoCloud invoice id accepted by merchant/info."""
+    raw = (value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urllib.parse.urlparse(raw)
+        if parsed.scheme and parsed.netloc:
+            raw = (parsed.path or "").strip("/").split("/")[-1]
+    except Exception:
+        pass
+    raw = raw.split("?", 1)[0].strip().strip("/")
+    return raw
+
+
+def _cryptocloud_payload_invoice_ref(payload: dict | None, row: dict | None = None) -> str:
+    payload = payload or {}
+    invoice_info = payload.get("invoice_info") if isinstance(payload.get("invoice_info"), dict) else {}
+    for value in (
+        invoice_info.get("uuid"),
+        payload.get("invoice_uuid"),
+        payload.get("invoice_id"),
+        row.get("tx_hash") if row else None,
+        row.get("wallet_address") if row else None,
+    ):
+        ref = _cryptocloud_invoice_ref(str(value) if value is not None else "")
+        if ref and ref.lower() != "none":
+            return ref
+    return ""
+
+
+def _cryptocloud_status_from_info(info: dict | None) -> str:
+    if not info:
+        return ""
+    invoice_status = str(info.get("invoice_status") or "").lower()
+    status = str(info.get("status") or "").lower()
+    if invoice_status in CRYPTOCLOUD_SUCCESS_STATUSES:
+        return "success"
+    if status in CRYPTOCLOUD_PAID_STATUSES:
+        return "success"
+    return status or invoice_status
+
+
+def _cryptocloud_payload_is_success(payload: dict | None) -> bool:
+    payload = payload or {}
+    invoice_info = payload.get("invoice_info") if isinstance(payload.get("invoice_info"), dict) else {}
+    status = str(payload.get("status") or "").lower()
+    invoice_status = str(invoice_info.get("invoice_status") or "").lower()
+    info_status = str(invoice_info.get("status") or "").lower()
+    return (
+        status in CRYPTOCLOUD_SUCCESS_STATUSES
+        or invoice_status in CRYPTOCLOUD_SUCCESS_STATUSES
+        or info_status in CRYPTOCLOUD_PAID_STATUSES
+    )
+
+
+def _cryptocloud_amount_usd(info: dict | None) -> float:
+    info = info or {}
+    return _safe_float(_dict_get_any(
+        info,
+        "amount_paid_usd",
+        "received_usd",
+        "amount_usd",
+        "amount_in_fiat",
+        "amount_to_pay_usd",
+    ))
+
+
+def _cryptocloud_token_is_valid(token: str | None) -> bool | None:
+    """Return True/False for a present token, None when token is absent."""
+    token = (token or "").strip()
+    if not token:
+        return None
+    if not CRYPTOCLOUD_SECRET:
+        logger.warning("Cryptocloud postback has token but CRYPTOCLOUD_SECRET is unset; falling back to invoice info verification")
+        return None
+    try:
+        import jwt as _jwt
+        _jwt.decode(token, CRYPTOCLOUD_SECRET, algorithms=["HS256"])
+        return True
+    except Exception as e:
+        logger.warning(f"Cryptocloud postback invalid JWT: {e}")
+        return False
+
+
+async def _fetch_cryptocloud_invoice_info(invoice_ref: str) -> dict | None:
+    invoice_ref = _cryptocloud_invoice_ref(invoice_ref)
+    if not invoice_ref:
+        return None
+    if not CRYPTOCLOUD_API_KEY:
+        logger.warning("Cannot verify Cryptocloud invoice %s: CRYPTOCLOUD_API_KEY is unset", invoice_ref)
+        return None
+
+    headers = {
+        "Authorization": f"Token {CRYPTOCLOUD_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    try:
+        timeout = ClientTimeout(total=12)
+        async with ClientSession(timeout=timeout) as http:
+            async with http.post(CRYPTOCLOUD_INFO_URL, json={"uuids": [invoice_ref]}, headers=headers) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    logger.warning("Cryptocloud invoice info error %s: %s", resp.status, text[:300])
+                    return None
+                try:
+                    data = json.loads(text)
+                except Exception:
+                    logger.warning("Cryptocloud invoice info invalid JSON: %s", text[:300])
+                    return None
+    except Exception as e:
+        logger.warning("Cryptocloud invoice info request failed for %s: %s", invoice_ref, e)
+        return None
+
+    if data.get("status") != "success":
+        logger.warning("Cryptocloud invoice info non-success for %s: %s", invoice_ref, data)
+        return None
+    result = data.get("result") or []
+    if isinstance(result, list) and result:
+        return result[0] if isinstance(result[0], dict) else None
+    if isinstance(result, dict):
+        return result
+    return None
+
+
+async def _credit_cryptocloud_order(
+    *,
+    order_id: str,
+    payload: dict | None = None,
+    invoice_info: dict | None = None,
+    source: str = "postback",
+) -> dict:
+    """Mark a Cryptocloud order paid, credit days once, notify, and issue invite."""
+    order_id = (order_id or "").strip()
+    if not order_id:
+        return {"ok": False, "status": "ignored", "reason": "missing-order"}
+
+    payload = payload or {}
+    invoice_info = invoice_info or {}
+    amount_crypto = _dict_get_any(payload, "amount_crypto") or _dict_get_any(invoice_info, "amount_paid", "amount")
+    currency_cc = _dict_get_any(payload, "currency")
+    if not currency_cc:
+        inv_currency = invoice_info.get("currency") if isinstance(invoice_info.get("currency"), dict) else {}
+        currency_cc = _dict_get_any(inv_currency, "fullcode", "code") or ""
+    invoice_ref = _cryptocloud_payload_invoice_ref(payload, None) or _cryptocloud_invoice_ref(invoice_info.get("uuid"))
+
+    async with async_session() as session:
+        row_result = await session.execute(
+            sa_text("SELECT * FROM crypto_checkouts WHERE order_uuid = :uuid"),
+            {"uuid": order_id},
+        )
+        row = row_result.mappings().one_or_none()
+        if not row:
+            logger.warning("Cryptocloud %s for unknown order_id=%s", source, order_id)
+            return {"ok": False, "status": "ignored", "reason": "unknown-order"}
+
+        telegram_id = int(row["telegram_id"])
+        tier = (row["tier"] or "plus").lower()
+        expected_amount = _safe_float(row["crypto_amount"])
+
+        if row["status"] == "confirmed":
+            link = await get_latest_invite(session, telegram_id)
+            return {
+                "ok": True,
+                "status": "confirmed",
+                "already_confirmed": True,
+                "telegram_id": telegram_id,
+                "tier": tier,
+                "invite_link": link,
+            }
+
+        paid_usd = _cryptocloud_amount_usd(invoice_info)
+        if paid_usd and expected_amount and paid_usd + 0.01 < expected_amount:
+            logger.warning(
+                "Cryptocloud amount mismatch order=%s paid_usd=%.4f expected=%.4f",
+                order_id, paid_usd, expected_amount,
+            )
+            return {"ok": False, "status": "ignored", "reason": "amount-mismatch"}
+
+        if not invoice_ref:
+            invoice_ref = _cryptocloud_payload_invoice_ref(payload, row)
+
+        update_result = await session.execute(
+            sa_text(
+                "UPDATE crypto_checkouts SET status = 'confirmed', tx_hash = :tx, "
+                "crypto_currency = :curr, crypto_amount = :amt WHERE order_uuid = :uuid AND status != 'confirmed'"
+            ),
+            {
+                "tx": invoice_ref or str(_dict_get_any(payload, "invoice_id") or ""),
+                "curr": currency_cc or row["crypto_currency"],
+                "amt": _safe_float(amount_crypto, expected_amount),
+                "uuid": order_id,
+            },
+        )
+        if getattr(update_result, "rowcount", 1) == 0:
+            await session.commit()
+            link = await get_latest_invite(session, telegram_id)
+            return {
+                "ok": True,
+                "status": "confirmed",
+                "already_confirmed": True,
+                "telegram_id": telegram_id,
+                "tier": tier,
+                "invite_link": link,
+            }
+
+        user_result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+        user = user_result.scalar_one_or_none()
+        if not user:
+            user = User(
+                telegram_id=telegram_id,
+                units=31,
+                is_active=True,
+                tier=tier,
+                last_payment_method="crypto",
+            )
+            session.add(user)
+        else:
+            base = max(0, user.units or 0)
+            user.units = base + 31
+            user.is_active = True
+            user.tier = tier
+            user.last_payment_method = "crypto"
+        assign_tier_badge(user)
+
+        await session.commit()
+        await session.refresh(user)
+        new_total = user.units
+        lang = user.lang or "en"
+        username = user.username
+        full_name = user.full_name
+
+    if tier == "elite":
+        try:
+            from utils.sync import send_peer_elite_grant
+            await send_peer_elite_grant(
+                telegram_id=telegram_id,
+                order_uuid=f"crypto:{order_id}",
+                username=username,
+                full_name=full_name,
+                days=31,
+                tier=tier,
+            )
+        except Exception as e:
+            logger.warning("Peer ELITE sync failed for crypto order %s: %s", order_id, e)
+
+    await _notify_admins(
+        f"💎 <b>Оплата Cryptocloud подтверждена</b>\n"
+        f"👤 <code>{telegram_id}</code> | Тир: <b>{tier.upper()}</b>\n"
+        f"💰 {amount_crypto or 'paid'} {currency_cc or ''}\n"
+        f"📅 +31 | Итого: {new_total} дн.\n"
+        f"🔑 Order: <code>{order_id}</code>"
+    )
+
+    invite_link = await _create_group_invite_for_user(telegram_id, store_pending=True)
+    if invite_link:
+        bot = Bot(token=BOT_TOKEN)
+        try:
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            if lang == "ru":
+                text = (
+                    "✅ <b>Крипто-оплата прошла успешно!</b>\n\n"
+                    f"📅 Добавлено: <b>31 день</b>\n"
+                    f"📅 Итого: <b>{new_total} дней</b>\n\n"
+                    "👇 Нажми кнопку ниже, чтобы вступить в группу.\n"
+                    "<i>Ссылка одноразовая — после вступления истекает.</i>"
+                )
+                btn = "🔗 Вступить в группу"
+            else:
+                text = (
+                    "✅ <b>Crypto payment successful!</b>\n\n"
+                    f"📅 Added: <b>31 days</b>\n"
+                    f"📅 Total: <b>{new_total} days</b>\n\n"
+                    "👇 Tap the button below to join the group.\n"
+                    "<i>One-time link — expires after use.</i>"
+                )
+                btn = "🔗 Join the group"
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=btn, url=invite_link)]])
+            await bot.send_message(telegram_id, text, parse_mode="HTML", reply_markup=kb)
+        except Exception as e:
+            logger.error(f"Cannot DM crypto-paid user {telegram_id}: {e}")
+        finally:
+            await bot.session.close()
+
+    return {
+        "ok": True,
+        "status": "confirmed",
+        "already_confirmed": False,
+        "telegram_id": telegram_id,
+        "tier": tier,
+        "days_left": new_total,
+        "invite_link": invite_link,
+    }
+
+
 async def api_cryptocloud_checkout(request: web.Request) -> web.Response:
     """POST /miniapp/cryptocloud/checkout — create a Cryptocloud invoice and
     return the hosted payment URL. The user opens it in a browser/Telegram WebApp,
@@ -984,10 +1300,6 @@ async def cryptocloud_postback(request: web.Request) -> web.Response:
     plus `status`, `order_id`, `invoice_id`, `amount_crypto`, `currency`.
     On verified success we credit 31 days and issue an invite link.
     """
-    if not CRYPTOCLOUD_SECRET:
-        logger.error("Cryptocloud postback received but CRYPTOCLOUD_SECRET is unset")
-        return web.Response(status=503, text="not configured")
-
     # Cryptocloud may send JSON or form-urlencoded depending on project settings.
     body_bytes = await request.read()
     ctype = (request.headers.get("Content-Type") or "").lower()
@@ -1000,35 +1312,64 @@ async def cryptocloud_postback(request: web.Request) -> web.Response:
         logger.warning(f"Cryptocloud postback parse error: {e}")
         return web.Response(status=400, text="bad body")
 
-    token       = payload.get("token") or ""
-    status      = payload.get("status") or ""
-    order_id    = payload.get("order_id") or ""
-    invoice_id  = payload.get("invoice_id") or ""
-    amount_crypto = payload.get("amount_crypto")
-    currency_cc = payload.get("currency") or ""
-
-    if not token:
-        logger.warning("Cryptocloud postback missing token field")
-        return web.Response(status=403, text="missing token")
-
-    # Verify JWT signature (HS256, signed with project SECRET).
-    try:
-        import jwt as _jwt
-        _jwt.decode(token, CRYPTOCLOUD_SECRET, algorithms=["HS256"])
-    except Exception as e:
-        logger.warning(f"Cryptocloud postback invalid JWT: {e}")
+    token_state = _cryptocloud_token_is_valid(payload.get("token"))
+    if token_state is False:
         return web.Response(status=403, text="bad signature")
 
-    if status != "success":
-        # Cryptocloud doesn't ping on non-success states by default, but be safe.
-        logger.info(f"Cryptocloud postback non-success status={status} order={order_id}")
-        return web.json_response({"status": "ignored"})
-
+    order_id = str(payload.get("order_id") or "").strip()
     if not order_id:
-        logger.warning(f"Cryptocloud postback success without order_id (invoice {invoice_id})")
+        logger.warning("Cryptocloud postback without order_id: %s", {k: v for k, v in payload.items() if k != "token"})
         return web.json_response({"status": "ignored"})
 
-    # Look up the order, credit the user.
+    invoice_info = payload.get("invoice_info") if isinstance(payload.get("invoice_info"), dict) else None
+    if token_state is not True:
+        async with async_session() as session:
+            row_result = await session.execute(
+                sa_text("SELECT * FROM crypto_checkouts WHERE order_uuid = :uuid"),
+                {"uuid": order_id},
+            )
+            row = row_result.mappings().one_or_none()
+            if not row:
+                logger.warning("Cryptocloud postback for unknown order_id=%s", order_id)
+                return web.json_response({"status": "ignored"})
+            invoice_ref = _cryptocloud_payload_invoice_ref(payload, row)
+        invoice_info = await _fetch_cryptocloud_invoice_info(invoice_ref)
+        if _cryptocloud_status_from_info(invoice_info) != "success":
+            logger.info("Cryptocloud postback not confirmed by API order=%s status=%s", order_id, _cryptocloud_status_from_info(invoice_info))
+            return web.json_response({"status": "ignored"})
+    elif not _cryptocloud_payload_is_success(payload):
+        status = payload.get("status") or ""
+        logger.info("Cryptocloud postback non-success status=%s order=%s", status, order_id)
+        return web.json_response({"status": "ignored"})
+
+    result = await _credit_cryptocloud_order(
+        order_id=order_id,
+        payload=payload,
+        invoice_info=invoice_info,
+        source="postback",
+    )
+    return web.json_response({"status": result.get("status", "ok"), "ok": bool(result.get("ok"))})
+
+
+async def api_cryptocloud_status(request: web.Request) -> web.Response:
+    """POST /miniapp/cryptocloud/status — verify a checkout from the miniapp.
+
+    This is a fallback for the real-world case where the project postback URL
+    is not configured yet or the callback arrives without a usable JWT token.
+    """
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+
+    try:
+        data = await request.json()
+        order_id = str(data.get("order_id") or "").strip()
+    except Exception:
+        return web.json_response({"error": "Bad body"}, status=400)
+    if not order_id:
+        return web.json_response({"error": "Missing order_id"}, status=400)
+
+    user_id = int(user_data["user_id"])
     async with async_session() as session:
         row_result = await session.execute(
             sa_text("SELECT * FROM crypto_checkouts WHERE order_uuid = :uuid"),
@@ -1036,89 +1377,31 @@ async def cryptocloud_postback(request: web.Request) -> web.Response:
         )
         row = row_result.mappings().one_or_none()
         if not row:
-            logger.warning(f"Cryptocloud postback for unknown order_id={order_id}")
-            return web.json_response({"status": "ignored"})
+            return web.json_response({"status": "unknown", "paid": False})
+        if int(row["telegram_id"]) != user_id:
+            return web.json_response({"error": "Forbidden"}, status=403)
 
-        # Idempotency — Cryptocloud may retry. Confirm only once.
         if row["status"] == "confirmed":
-            logger.info(f"Cryptocloud postback duplicate for {order_id}")
-            return web.json_response({"status": "ok"})
+            link = await get_latest_invite(session, user_id)
+            return web.json_response({"status": "confirmed", "paid": True, "invite_link": link})
+        invoice_ref = _cryptocloud_payload_invoice_ref({}, row)
 
-        telegram_id = int(row["telegram_id"])
-        tier        = (row["tier"] or "plus").lower()
+    invoice_info = await _fetch_cryptocloud_invoice_info(invoice_ref)
+    status = _cryptocloud_status_from_info(invoice_info)
+    if status != "success":
+        return web.json_response({"status": status or "pending", "paid": False})
 
-        await session.execute(
-            sa_text(
-                "UPDATE crypto_checkouts SET status = 'confirmed', tx_hash = :tx, "
-                "crypto_currency = :curr, crypto_amount = :amt WHERE order_uuid = :uuid"
-            ),
-            {"tx": str(invoice_id), "curr": currency_cc or row["crypto_currency"],
-             "amt": float(amount_crypto) if amount_crypto is not None else float(row["crypto_amount"] or 0),
-             "uuid": order_id},
-        )
-
-        # Credit subscription — same rules as Stars: no grace carryover.
-        user_result = await session.execute(select(User).where(User.telegram_id == telegram_id))
-        user = user_result.scalar_one_or_none()
-        if not user:
-            user = User(
-                telegram_id=telegram_id,
-                units=31,
-                is_active=True,
-                tier=tier,
-                last_payment_method="crypto",
-            )
-            session.add(user)
-        else:
-            base = max(0, user.units or 0)
-            user.units = base + 31
-            user.is_active = True
-            user.tier = tier
-            user.last_payment_method = "crypto"
-        assign_tier_badge(user)
-
-        await session.commit()
-        new_total = user.units
-        lang      = user.lang or "en"
-
-    nick = f"id{telegram_id}"
-    await _notify_admins(
-        f"💎 <b>Оплата Cryptocloud подтверждена</b>\n"
-        f"👤 <code>{telegram_id}</code> | Тир: <b>{tier.upper()}</b>\n"
-        f"💰 {amount_crypto} {currency_cc}\n"
-        f"📅 +31 | Итого: {new_total} дн."
+    result = await _credit_cryptocloud_order(
+        order_id=order_id,
+        invoice_info=invoice_info,
+        source="status",
     )
-
-    # Issue a one-time invite link and send DM (also stored as pending for miniapp polling).
-    invite_link = await _create_group_invite_for_user(telegram_id, store_pending=True)
-    if invite_link:
-        bot = Bot(token=BOT_TOKEN)
-        try:
-            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-            if lang == "ru":
-                text = (f"✅ <b>Крипто-оплата прошла успешно!</b>\n\n"
-                        f"📅 Добавлено: <b>31 день</b>\n"
-                        f"📅 Итого: <b>{new_total} дней</b>\n\n"
-                        f"👇 Нажми кнопку ниже чтобы вступить в группу.\n"
-                        f"<i>Ссылка одноразовая — после вступления истекает.</i>")
-                btn = "🔗 Вступить в группу"
-            else:
-                text = (f"✅ <b>Crypto payment successful!</b>\n\n"
-                        f"📅 Added: <b>31 days</b>\n"
-                        f"📅 Total: <b>{new_total} days</b>\n\n"
-                        f"👇 Tap the button below to join the group.\n"
-                        f"<i>One-time link — expires after use.</i>")
-                btn = "🔗 Join the group"
-            kb = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text=btn, url=invite_link)
-            ]])
-            await bot.send_message(telegram_id, text, parse_mode="HTML", reply_markup=kb)
-        except Exception as e:
-            logger.error(f"Cannot DM crypto-paid user {telegram_id}: {e}")
-        finally:
-            await bot.session.close()
-
-    return web.json_response({"status": "ok"})
+    return web.json_response({
+        "status": result.get("status", "confirmed"),
+        "paid": bool(result.get("ok")),
+        "invite_link": result.get("invite_link"),
+        "days_left": result.get("days_left"),
+    })
 
 
 async def api_get_recommended(request: web.Request) -> web.Response:
@@ -2047,6 +2330,7 @@ def create_app() -> web.Application:
     app.router.add_get("/miniapp/video/{id:[0-9]+}", api_get_video_by_id)
     app.router.add_get("/miniapp/recommended", api_get_recommended)
     app.router.add_post("/miniapp/cryptocloud/checkout", api_cryptocloud_checkout)
+    app.router.add_post("/miniapp/cryptocloud/status", api_cryptocloud_status)
     app.router.add_post("/miniapp/cryptocloud/postback", cryptocloud_postback)
     app.router.add_post("/miniapp/watch_progress", api_watch_progress)
     app.router.add_post("/miniapp/continue_watching", api_continue_watching)

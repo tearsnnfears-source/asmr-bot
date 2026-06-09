@@ -6,7 +6,7 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts, Tag, get_all_tags, get_tag, create_tag, delete_tag, CustomBadge, create_custom_badge, get_custom_badges, delete_custom_badge, assign_tier_badge
+from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts, Tag, get_all_tags, get_tag, create_tag, delete_tag, CustomBadge, create_custom_badge, get_custom_badges, delete_custom_badge, assign_tier_badge, create_or_update_promo_code
 from handlers.group import enable_night_mode, disable_night_mode
 from config import ADMIN_IDS, GROUP_ID, INVITE_LINK
 
@@ -160,6 +160,60 @@ async def cmd_night_off(message: Message, bot: Bot):
     await message.reply("☀️ Ночной режим выключен.")
 
 
+# ─── /create_code [CODE] [days] [max_uses] ────────────────────────────────────
+
+@router.message(Command("create_code"))
+async def cmd_create_code(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()[1:]
+    if len(args) not in (2, 3):
+        await message.reply("Использование: <code>/create_code LEAK 75</code> или <code>/create_code LEAK 75 10</code>", parse_mode="HTML")
+        return
+
+    code, days_raw = args[0], args[1]
+    if not days_raw.isdigit():
+        await message.reply("Дни должны быть числом. Пример: <code>/create_code LEAK 75 10</code>", parse_mode="HTML")
+        return
+
+    max_uses = None
+    if len(args) == 3:
+        if not args[2].isdigit():
+            await message.reply("Лимит применений должен быть числом. Пример: <code>/create_code LEAK 75 10</code>", parse_mode="HTML")
+            return
+        max_uses = int(args[2])
+        if max_uses <= 0:
+            await message.reply("Лимит применений должен быть больше 0.", parse_mode="HTML")
+            return
+
+    days = int(days_raw)
+    if days <= 0:
+        await message.reply("Дни должны быть больше 0.", parse_mode="HTML")
+        return
+
+    try:
+        promo, created = await create_or_update_promo_code(
+            session,
+            code=code,
+            days=days,
+            max_uses=max_uses,
+            created_by=message.from_user.id,
+        )
+    except ValueError as e:
+        await message.reply(f"❌ {e}", parse_mode="HTML")
+        return
+
+    action = "создан" if created else "обновлён"
+    limit_text = f"{promo.max_uses} применений" if promo.max_uses is not None else "без лимита"
+    await message.reply(
+        f"✅ Промокод <code>{promo.code}</code> {action}\n"
+        f"📅 После оплаты начислит: <b>{promo.days} дней</b>\n"
+        f"🔢 Лимит: <b>{limit_text}</b>",
+        parse_mode="HTML",
+    )
+
+
 # ─── /admin_help ─────────────────────────────────────────────────────────────
 
 @router.message(Command("admin_help"))
@@ -176,6 +230,8 @@ async def cmd_admin_help(message: Message):
         "/allusers — список всех пользователей\n"
         "/activeusers — только с активной подпиской (units > 0)\n"
         "/analytics — статистика: конверсия, тиры, топ артисты, теги\n\n"
+        "📣 <b>Рассылки:</b>\n"
+        "/broadcast — рассылка: все / активные / без подписки\n\n"
         "🏅 <b>Бейджи (накапливаются!):</b>\n"
         "/badges — список всех бейджей\n"
         "/create_badge \"NAME\" | #HEX — создать кастомный бейдж\n"
@@ -193,6 +249,7 @@ async def cmd_admin_help(message: Message):
         "/users_tiers — активные юзеры с тирами и днями\n"
         "/sync_tier_badges — выдать бейджи PLUS/PRO/ELITE всем по тиру\n"
         "/fix_grace — убрать grace у не-tribute пользователей (одноразово)\n"
+        "/create_code [CODE] [дней] [лимит] — промокод на дни после оплаты\n"
         "   plus — стандарт (€6), pro — расширенный (€8), elite — скоро\n\n"
         "🎨 <b>Артисты и контент:</b>\n"
         "/set_cont — управление артистами\n"
@@ -216,6 +273,13 @@ class BroadcastForm(_SG):
     content  = State()
     buttons  = State()
     confirm  = State()
+
+
+BROADCAST_TARGETS = {
+    "all": "всем пользователям",
+    "active": "пользователям с активной подпиской",
+    "inactive": "пользователям без активной подписки",
+}
 
 
 @router.message(Command("broadcast"))
@@ -305,13 +369,15 @@ async def broadcast_got_buttons(message: Message, state: FSMContext):
     await message.answer(
         "Отправить рассылку?",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Отправить всем", callback_data="broadcast_send")],
+            [InlineKeyboardButton(text="👥 Всем", callback_data="broadcast_send:all")],
+            [InlineKeyboardButton(text="✅ Активным", callback_data="broadcast_send:active")],
+            [InlineKeyboardButton(text="❌ Без подписки", callback_data="broadcast_send:inactive")],
             [InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast_cancel")],
         ])
     )
 
 
-@router.callback_query(F.data == "broadcast_send", BroadcastForm.confirm)
+@router.callback_query(F.data.startswith("broadcast_send"), BroadcastForm.confirm)
 async def broadcast_confirm(call: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot):
     data = await state.get_data()
     await state.clear()
@@ -319,14 +385,28 @@ async def broadcast_confirm(call: CallbackQuery, state: FSMContext, session: Asy
     text = data.get("text", "")
     photo = data.get("photo")
     kb = data.get("keyboard")
+    target = "all"
+    if call.data and ":" in call.data:
+        target = call.data.split(":", 1)[1]
+    if target not in BROADCAST_TARGETS:
+        target = "all"
 
-    # Get all users
     from sqlalchemy import select as sa_select
-    result = await session.execute(sa_select(User.telegram_id))
+    query = sa_select(User.telegram_id)
+    if target == "active":
+        query = query.where(User.units > 0)
+    elif target == "inactive":
+        query = query.where(User.units <= 0)
+    result = await session.execute(query)
     user_ids = [r[0] for r in result.all()]
 
-    await call.message.edit_text(f"📤 Рассылка начата... 0/{len(user_ids)}")
     await call.answer()
+    target_label = BROADCAST_TARGETS[target]
+    if not user_ids:
+        await call.message.edit_text(f"❌ Нет получателей: {target_label}.")
+        return
+
+    await call.message.edit_text(f"📤 Рассылка начата: {target_label}... 0/{len(user_ids)}")
 
     sent, failed = 0, 0
     for i, uid in enumerate(user_ids):
@@ -341,7 +421,9 @@ async def broadcast_confirm(call: CallbackQuery, state: FSMContext, session: Asy
             failed += 1
         if (i + 1) % 25 == 0:
             try:
-                await call.message.edit_text(f"📤 Рассылка... {i+1}/{len(user_ids)} (✅ {sent} / ❌ {failed})")
+                await call.message.edit_text(
+                    f"📤 Рассылка: {target_label}... {i+1}/{len(user_ids)} (✅ {sent} / ❌ {failed})"
+                )
             except Exception:
                 pass
             import asyncio
@@ -349,6 +431,7 @@ async def broadcast_confirm(call: CallbackQuery, state: FSMContext, session: Asy
 
     await call.message.edit_text(
         f"✅ <b>Рассылка завершена!</b>\n\n"
+        f"🎯 Получатели: <b>{target_label}</b>\n"
         f"📤 Всего: {len(user_ids)}\n"
         f"✅ Доставлено: {sent}\n"
         f"❌ Ошибок: {failed}",

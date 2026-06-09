@@ -23,6 +23,7 @@ TRIBUTE_SITE_WEBHOOK_URL = os.getenv(
 TRIBUTE_PLUS_URL    = os.getenv("TRIBUTE_PLUS_URL",  "https://t.me/tribute/app?startapp=sQSn")
 TRIBUTE_PRO_URL     = os.getenv("TRIBUTE_PRO_URL",   "https://t.me/tribute/app?startapp=sT5D")
 TRIBUTE_ELITE_URL   = os.getenv("TRIBUTE_ELITE_URL", "https://t.me/tribute/app?startapp=sT5E")
+TRIBUTE_ELITE_MIN_EUR = float(os.getenv("TRIBUTE_ELITE_MIN_EUR", "9") or "9")
 
 # startapp code → tier (used in webhook to auto-assign tier)
 TRIBUTE_TIER_MAP = {
@@ -71,3 +72,12 @@ CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID", "")
 CRYPTOCLOUD_SECRET  = os.getenv("CRYPTOCLOUD_SECRET", "")  # HS256 secret for postback JWT verification
 CRYPTOCLOUD_API_URL = os.getenv("CRYPTOCLOUD_API_URL", "https://api.cryptocloud.plus/v2/invoice/create")
 CRYPTOCLOUD_INFO_URL = os.getenv("CRYPTOCLOUD_INFO_URL", "https://api.cryptocloud.plus/v2/invoice/merchant/info")
+
+# Cross-bot ELITE sync. The receiving bot checks INTERNAL_GRANT_SECRET.
+# The sending bot posts to PEER_GRANT_URL using PEER_GRANT_SECRET.
+PROJECT_KEY = os.getenv("PROJECT_KEY", "asmrleaks")
+INTERNAL_GRANT_SECRET = os.getenv("INTERNAL_GRANT_SECRET", "")
+PEER_GRANT_URL = os.getenv("PEER_GRANT_URL", "")
+PEER_GRANT_SECRET = os.getenv("PEER_GRANT_SECRET", "")
+PEER_PROJECT_KEY = os.getenv("PEER_PROJECT_KEY", "privateleaks")
+ELITE_SYNC_DAYS = int(os.getenv("ELITE_SYNC_DAYS", "31") or "31")

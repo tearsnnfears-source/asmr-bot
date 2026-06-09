@@ -12,10 +12,11 @@ from aiogram import Router, F, Bot
 from aiogram.types import PreCheckoutQuery, Message
 from aiogram.types.message import ContentType
 from sqlalchemy.ext.asyncio import AsyncSession
-from database import get_or_create_user, PendingPayment, create_pending_invite, assign_tier_badge
+from database import get_or_create_user, PendingPayment, create_pending_invite, assign_tier_badge, consume_active_promo_days
 from keyboards.inline import kb_payment, kb_plans, kb_after_payment, kb_back_to_cabinet
 from locales.texts import t
 from config import STARS_PRICES, STARS_TIER_PRICES, INVITE_LINK, GROUP_ID
+from utils.sync import send_peer_elite_grant
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -191,8 +192,17 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
             )
             return
 
-        # Начисляем подписку (Stars — без grace debt, стартуем от 0 если был в минусе)
         user = await get_or_create_user(session, user_id)
+        charge_id = message.successful_payment.telegram_payment_charge_id or payload
+        days, promo_code = await consume_active_promo_days(
+            session,
+            telegram_id=user_id,
+            default_days=days,
+            payment_method="stars",
+            order_uuid=f"stars:{charge_id}",
+        )
+
+        # Начисляем подписку (Stars — без grace debt, стартуем от 0 если был в минусе)
         lang = user.lang or "en"
         base = max(0, user.units)  # Stars не наследуют grace debt
         user.units = base + days
@@ -205,11 +215,23 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
         logger.info(f"Stars credited: user {user_id} +{days} days → total {user.units}")
 
         # Уведомление админу
+        if tier == "elite":
+            await send_peer_elite_grant(
+                telegram_id=user_id,
+                order_uuid=f"stars:{message.successful_payment.telegram_payment_charge_id or payload}",
+                username=user.username,
+                full_name=user.full_name,
+                days=days,
+                tier=tier,
+            )
+
         nick = f"@{user.username}" if user.username else f"id{user_id}"
+        promo_line = f"\n🎟 Промокод: <code>{promo_code}</code>" if promo_code else ""
         await _notify_admins(bot,
             f"⭐ <b>Новая оплата — TG Stars</b>\n"
             f"👤 {nick} | <code>{user_id}</code>\n"
             f"📅 +{days} дней | Итого: {user.units} дн."
+            f"{promo_line}"
         )
 
         # Generate unique invite link and store for miniapp polling

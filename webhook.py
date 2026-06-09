@@ -11,8 +11,8 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select, text as sa_text, func as sa_func, or_ as sa_or
 
-from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, _auto_thumbnail
-from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_USDT_PRICES, CRYPTOCLOUD_API_KEY, CRYPTOCLOUD_SHOP_ID, CRYPTOCLOUD_SECRET, CRYPTOCLOUD_API_URL, CRYPTOCLOUD_INFO_URL
+from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, activate_promo_code, get_active_promo_activation, consume_active_promo_days, mark_promo_code_used, normalize_promo_code, _auto_thumbnail
+from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, CRYPTO_USDT_PRICES, CRYPTOCLOUD_API_KEY, CRYPTOCLOUD_SHOP_ID, CRYPTOCLOUD_SECRET, CRYPTOCLOUD_API_URL, CRYPTOCLOUD_INFO_URL, PROJECT_KEY, PEER_GRANT_URL, PEER_GRANT_SECRET
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +192,52 @@ async def forward_tribute_webhook(body: bytes, signature: str) -> None:
     except Exception as e:
         logger.warning("Failed to forward Tribute webhook to site: %s", e)
 
+
+async def relay_privateleaks_tribute_grant(
+    body: bytes,
+    *,
+    telegram_id: int,
+    username: str = "",
+    days: int = 31,
+) -> bool:
+    """Route shared-Tribute-account PrivateLeaks PLUS payments to the PL bot."""
+    if not PEER_GRANT_URL or not PEER_GRANT_SECRET:
+        logger.warning("PrivateLeaks Tribute relay skipped: peer grant is not configured")
+        return False
+
+    order_uuid = f"tribute-privateleaks:{hashlib.sha256(body).hexdigest()[:24]}"
+    payload = {
+        "source_project": PROJECT_KEY,
+        "order_uuid": order_uuid,
+        "telegram_id": int(telegram_id),
+        "days": int(days),
+        "tier": "plus",
+        "username": username or "",
+        "payment_method": "tribute",
+    }
+    headers = {
+        "Authorization": f"Bearer {PEER_GRANT_SECRET}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        timeout = ClientTimeout(total=10)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(PEER_GRANT_URL, json=payload, headers=headers) as response:
+                text = await response.text()
+                if response.status >= 400:
+                    logger.warning(
+                        "PrivateLeaks Tribute relay failed: status=%s body=%s",
+                        response.status,
+                        text[:300],
+                    )
+                    return False
+                logger.info("PrivateLeaks Tribute relay accepted for user %s order %s", telegram_id, order_uuid)
+                return True
+    except Exception as exc:
+        logger.warning("PrivateLeaks Tribute relay error for user %s: %s", telegram_id, exc)
+        return False
+
 @web.middleware
 async def cors_middleware(request, handler):
     if request.method == 'OPTIONS':
@@ -216,8 +262,6 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         if not hmac.compare_digest(expected, signature):
             logger.warning("Invalid Tribute signature")
             return web.Response(status=403)
-
-    await forward_tribute_webhook(body, signature)
 
     try:
         data = json.loads(body)
@@ -248,6 +292,33 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             except Exception:
                 amount_eur = 0
 
+            TRIBUTE_DAYS = 31
+            if abs(amount_eur - 3.0) < 0.001:
+                username = payload.get("telegram_username", "")
+                relayed = await relay_privateleaks_tribute_grant(
+                    body,
+                    telegram_id=telegram_id,
+                    username=username,
+                    days=TRIBUTE_DAYS,
+                )
+                if not relayed:
+                    nick = f"@{username}" if username else f"id{telegram_id}"
+                    await _notify_admins(
+                        f"💳 <b>PrivateLeaks Tribute relay failed</b>\n"
+                        f"👤 {nick} | <code>{telegram_id}</code>\n"
+                        f"💰 €3.00 | ASMR not credited"
+                    )
+                logger.info(
+                    "PrivateLeaks Tribute amount routed away from ASMR: raw_amount=%s amount_eur=%.2f telegram_id=%s relayed=%s",
+                    payload.get("amount") or payload.get("price"),
+                    amount_eur,
+                    telegram_id,
+                    relayed,
+                )
+                return web.json_response({"status": "ok", "routed": "privateleaks", "relayed": relayed})
+
+            await forward_tribute_webhook(body, signature)
+
             # ELITE никогда не выдаётся автоматом — только админом вручную.
             # Tribute может проставить только PLUS или PRO.
             if amount_eur >= 7.0:
@@ -264,7 +335,14 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             # Никогда не понижаем admin-выданный тир (ELITE → PLUS/PRO) и не сбрасываем PRO.
             TIER_RANK = {'plus': 1, 'pro': 2, 'elite': 3}
 
-            TRIBUTE_DAYS = 31
+            tribute_order_uuid = f"tribute:{hashlib.sha256(body).hexdigest()[:24]}"
+            TRIBUTE_DAYS, promo_code = await consume_active_promo_days(
+                session,
+                telegram_id=telegram_id,
+                default_days=31,
+                payment_method="tribute",
+                order_uuid=tribute_order_uuid,
+            )
             if not user:
                 user = User(
                     telegram_id=telegram_id,
@@ -297,10 +375,12 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         # Уведомление админу о Tribute оплате
         username = payload.get("telegram_username", "")
         nick = f"@{username}" if username else f"id{telegram_id}"
+        promo_line = f"\n🎟 Промокод: <code>{promo_code}</code>" if promo_code else ""
         await _notify_admins(
             f"💳 <b>Новая оплата — Tribute</b>\n"
             f"👤 {nick} | <code>{telegram_id}</code>\n"
             f"📅 +{TRIBUTE_DAYS} | Итого: {total} дн."
+            f"{promo_line}"
         )
 
         bot = Bot(token=BOT_TOKEN)
@@ -323,13 +403,13 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
             if lang == "ru":
                 text = (f"✅ <b>Оплата через Tribute прошла успешно!</b>\n\n"
-                        f"📅 Добавлено: <b>31 день</b>\n"
+                        f"📅 Добавлено: <b>{TRIBUTE_DAYS} дней</b>\n"
                         f"📅 Итого: <b>{total} дней</b>\n\n"
                         f"👇 Нажми кнопку ниже чтобы вступить в группу.\n"
                         f"<i>Ссылка одноразовая — после вступления истекает.</i>")
             else:
                 text = (f"✅ <b>Tribute payment successful!</b>\n\n"
-                        f"📅 Added: <b>31 days</b>\n"
+                        f"📅 Added: <b>{TRIBUTE_DAYS} days</b>\n"
                         f"📅 Total: <b>{total} days</b>\n\n"
                         f"👇 Tap the button below to join the group.\n"
                         f"<i>One-time link — expires after use.</i>")
@@ -364,8 +444,10 @@ async def api_create_stars_invoice(request: web.Request) -> web.Response:
     try:
         data = await request.json()
         tier = str(data.get("tier", "plus")).lower()
+        promo_code = normalize_promo_code(data.get("promo_code") or data.get("promocode") or "")
     except:
         tier = "plus"
+        promo_code = ""
 
     plan = MINIAPP_STARS_PLANS.get(tier)
     if not plan:
@@ -374,6 +456,25 @@ async def api_create_stars_invoice(request: web.Request) -> web.Response:
     user_id = user_data["user_id"]
     days = plan["days"]
     stars = plan["stars"]
+    applied_promo_code = None
+
+    async with async_session() as session:
+        if promo_code:
+            try:
+                activation = await activate_promo_code(
+                    session,
+                    telegram_id=user_id,
+                    code=promo_code,
+                )
+            except ValueError as e:
+                status = 409 if "limit" in str(e).lower() else 404
+                return web.json_response({"error": str(e)}, status=status)
+        else:
+            activation = await get_active_promo_activation(session, user_id)
+        if activation:
+            days = activation.days
+            applied_promo_code = activation.code
+
     payload = f"stars_tier_{tier}_{user_id}"
     
     bot = Bot(token=BOT_TOKEN)
@@ -392,12 +493,44 @@ async def api_create_stars_invoice(request: web.Request) -> web.Response:
             "stars": stars,
             "days": days,
             "tier": tier,
+            "promo_code": applied_promo_code,
+            "promo_days": days if applied_promo_code else None,
         })
     except Exception as e:
         logger.error(f"Error creating invoice: {e}")
         return web.json_response({"error": str(e)}, status=500)
     finally:
         await bot.session.close()
+
+
+async def api_promo_activate(request: web.Request) -> web.Response:
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+
+    try:
+        data = await request.json()
+        promo_code = data.get("promo_code") or data.get("promocode") or data.get("code") or ""
+    except Exception:
+        return web.json_response({"error": "Bad body"}, status=400)
+
+    async with async_session() as session:
+        try:
+            activation = await activate_promo_code(
+                session,
+                telegram_id=user_data["user_id"],
+                code=promo_code,
+            )
+        except ValueError as e:
+            status = 409 if "limit" in str(e).lower() else 404
+            return web.json_response({"ok": False, "error": str(e)}, status=status)
+
+    return web.json_response({
+        "ok": True,
+        "code": activation.code,
+        "days": activation.days,
+        "message": f"Promo {activation.code} activated for {activation.days} days",
+    })
 
 
 async def api_check_invite(request: web.Request) -> web.Response:
@@ -887,6 +1020,15 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _safe_int(value, default: int = 31) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return max(1, min(3660, int(value)))
+    except Exception:
+        return default
+
+
 def _dict_get_any(data: dict, *keys: str):
     for key in keys:
         value = data.get(key)
@@ -1051,9 +1193,12 @@ async def _credit_cryptocloud_order(
             logger.warning("Cryptocloud %s for unknown order_id=%s", source, order_id)
             return {"ok": False, "status": "ignored", "reason": "unknown-order"}
 
+        row = dict(row)
         telegram_id = int(row["telegram_id"])
         tier = (row["tier"] or "plus").lower()
         expected_amount = _safe_float(row["crypto_amount"])
+        promo_code = normalize_promo_code(row.get("promo_code") or "")
+        credit_days = _safe_int(row.get("promo_days"), 31) if promo_code else 31
 
         if row["status"] == "confirmed":
             link = await get_latest_invite(session, telegram_id)
@@ -1101,12 +1246,22 @@ async def _credit_cryptocloud_order(
                 "invite_link": link,
             }
 
+        if promo_code:
+            await mark_promo_code_used(
+                session,
+                telegram_id=telegram_id,
+                code=promo_code,
+                days=credit_days,
+                payment_method="crypto",
+                order_uuid=f"crypto:{order_id}",
+            )
+
         user_result = await session.execute(select(User).where(User.telegram_id == telegram_id))
         user = user_result.scalar_one_or_none()
         if not user:
             user = User(
                 telegram_id=telegram_id,
-                units=31,
+                units=credit_days,
                 is_active=True,
                 tier=tier,
                 last_payment_method="crypto",
@@ -1114,7 +1269,7 @@ async def _credit_cryptocloud_order(
             session.add(user)
         else:
             base = max(0, user.units or 0)
-            user.units = base + 31
+            user.units = base + credit_days
             user.is_active = True
             user.tier = tier
             user.last_payment_method = "crypto"
@@ -1135,18 +1290,20 @@ async def _credit_cryptocloud_order(
                 order_uuid=f"crypto:{order_id}",
                 username=username,
                 full_name=full_name,
-                days=31,
+                days=credit_days,
                 tier=tier,
             )
         except Exception as e:
             logger.warning("Peer ELITE sync failed for crypto order %s: %s", order_id, e)
 
+    promo_line = f"\n🎟 Промокод: <code>{promo_code}</code>" if promo_code else ""
     await _notify_admins(
         f"💎 <b>Оплата Cryptocloud подтверждена</b>\n"
         f"👤 <code>{telegram_id}</code> | Тир: <b>{tier.upper()}</b>\n"
         f"💰 {amount_crypto or 'paid'} {currency_cc or ''}\n"
-        f"📅 +31 | Итого: {new_total} дн.\n"
+        f"📅 +{credit_days} | Итого: {new_total} дн.\n"
         f"🔑 Order: <code>{order_id}</code>"
+        f"{promo_line}"
     )
 
     invite_link = await _create_group_invite_for_user(telegram_id, store_pending=True)
@@ -1157,7 +1314,7 @@ async def _credit_cryptocloud_order(
             if lang == "ru":
                 text = (
                     "✅ <b>Крипто-оплата прошла успешно!</b>\n\n"
-                    f"📅 Добавлено: <b>31 день</b>\n"
+                    f"📅 Добавлено: <b>{credit_days} дней</b>\n"
                     f"📅 Итого: <b>{new_total} дней</b>\n\n"
                     "👇 Нажми кнопку ниже, чтобы вступить в группу.\n"
                     "<i>Ссылка одноразовая — после вступления истекает.</i>"
@@ -1166,7 +1323,7 @@ async def _credit_cryptocloud_order(
             else:
                 text = (
                     "✅ <b>Crypto payment successful!</b>\n\n"
-                    f"📅 Added: <b>31 days</b>\n"
+                    f"📅 Added: <b>{credit_days} days</b>\n"
                     f"📅 Total: <b>{new_total} days</b>\n\n"
                     "👇 Tap the button below to join the group.\n"
                     "<i>One-time link — expires after use.</i>"
@@ -1205,6 +1362,7 @@ async def api_cryptocloud_checkout(request: web.Request) -> web.Response:
     try:
         data = await request.json()
         tier = str(data.get("tier", "plus")).lower()
+        promo_code = normalize_promo_code(data.get("promo_code") or data.get("promocode") or "")
     except Exception:
         return web.json_response({"error": "Bad body"}, status=400)
 
@@ -1214,6 +1372,25 @@ async def api_cryptocloud_checkout(request: web.Request) -> web.Response:
     user_id = user_data["user_id"]
     amount  = float(CRYPTO_USDT_PRICES[tier])
     order_id = f"cc_{user_id}_{_uuid_mod.uuid4().hex[:12]}"
+    promo_days = 31
+    applied_promo_code = None
+
+    async with async_session() as session:
+        if promo_code:
+            try:
+                activation = await activate_promo_code(
+                    session,
+                    telegram_id=user_id,
+                    code=promo_code,
+                )
+            except ValueError as e:
+                status = 409 if "limit" in str(e).lower() else 404
+                return web.json_response({"error": str(e)}, status=status)
+        else:
+            activation = await get_active_promo_activation(session, user_id)
+        if activation:
+            promo_days = _safe_int(activation.days, 31)
+            applied_promo_code = activation.code
 
     invoice_body = {
         "shop_id":  CRYPTOCLOUD_SHOP_ID,
@@ -1264,11 +1441,12 @@ async def api_cryptocloud_checkout(request: web.Request) -> web.Response:
         async with async_session() as session:
             await session.execute(
                 sa_text(
-                    "INSERT INTO crypto_checkouts (order_uuid, telegram_id, tier, crypto_amount, crypto_currency, network, wallet_address, status, expires_at) "
-                    "VALUES (:uuid, :tid, :tier, :amount, 'USD', 'cryptocloud', :url, 'pending', :exp)"
+                    "INSERT INTO crypto_checkouts (order_uuid, telegram_id, tier, crypto_amount, crypto_currency, network, wallet_address, status, expires_at, promo_code, promo_days) "
+                    "VALUES (:uuid, :tid, :tier, :amount, 'USD', 'cryptocloud', :url, 'pending', :exp, :promo_code, :promo_days)"
                 ),
                 {"uuid": order_id, "tid": user_id, "tier": tier,
-                 "amount": amount, "url": pay_url, "exp": expires_at},
+                 "amount": amount, "url": pay_url, "exp": expires_at,
+                 "promo_code": applied_promo_code, "promo_days": promo_days},
             )
             await session.commit()
     except Exception as e:
@@ -1276,11 +1454,13 @@ async def api_cryptocloud_checkout(request: web.Request) -> web.Response:
 
     # Notify admins (informational — actual credit happens on postback).
     nick_uid = f"<code>{user_id}</code>"
+    promo_line = f"\n🎟 Промокод: <code>{applied_promo_code}</code> → {promo_days} дн." if applied_promo_code else ""
     await _notify_admins(
         f"💎 <b>Новый Cryptocloud-инвойс</b>\n"
         f"👤 {nick_uid} | Тир: <b>{tier.upper()}</b>\n"
         f"💰 ${amount} USD\n"
         f"🔑 Order: <code>{order_id}</code>"
+        f"{promo_line}"
     )
 
     return web.json_response({
@@ -1290,6 +1470,9 @@ async def api_cryptocloud_checkout(request: web.Request) -> web.Response:
         "amount":       amount,
         "currency":     "USD",
         "tier":         tier,
+        "days":         promo_days,
+        "promo_code":   applied_promo_code,
+        "promo_days":   promo_days if applied_promo_code else None,
         "expires_at":   expires_at.isoformat(),
     })
 
@@ -1298,7 +1481,7 @@ async def cryptocloud_postback(request: web.Request) -> web.Response:
     """POST /miniapp/cryptocloud/postback — Cryptocloud calls this after a
     successful payment. Body contains a JWT `token` (HS256 with project SECRET)
     plus `status`, `order_id`, `invoice_id`, `amount_crypto`, `currency`.
-    On verified success we credit 31 days and issue an invite link.
+    On verified success we credit the checkout days and issue an invite link.
     """
     # Cryptocloud may send JSON or form-urlencoded depending on project settings.
     body_bytes = await request.read()
@@ -2303,6 +2486,9 @@ def create_app() -> web.Application:
     app.router.add_get("/health", api_health)
     app.router.add_post("/tribute-webhook", tribute_webhook)
     app.router.add_post("/miniapp/create_stars_invoice", api_create_stars_invoice)
+    app.router.add_post("/miniapp/promo/activate", api_promo_activate)
+    app.router.add_post("/miniapp/promo/apply", api_promo_activate)
+    app.router.add_post("/miniapp/promo/validate", api_promo_activate)
     app.router.add_post("/miniapp/check_invite", api_check_invite)
     app.router.add_post("/miniapp/my_invite", api_my_invite)
     app.router.add_get("/miniapp/artists", api_get_artists)

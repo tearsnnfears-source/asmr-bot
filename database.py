@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import BigInteger, Integer, String, DateTime, Boolean, Text, text, func
+from sqlalchemy import BigInteger, Integer, String, DateTime, Boolean, Text, text, func, UniqueConstraint
 from datetime import datetime
 import os
 import re
@@ -59,6 +59,48 @@ class PendingInvite(Base):
     invite_link: Mapped[str]      = mapped_column(Text)
     used:        Mapped[bool]     = mapped_column(Boolean, default=False)
     created_at:  Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ExternalGrant(Base):
+    __tablename__ = "external_grants"
+    __table_args__ = (
+        UniqueConstraint("source_project", "order_uuid", name="uq_external_grant_source_order"),
+    )
+
+    id:             Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_project: Mapped[str]      = mapped_column(String(32), index=True)
+    order_uuid:     Mapped[str]      = mapped_column(String(96), index=True)
+    telegram_id:    Mapped[int]      = mapped_column(BigInteger, index=True)
+    days:           Mapped[int]      = mapped_column(Integer, default=31)
+    tier:           Mapped[str]      = mapped_column(String(16), default="elite")
+    created_at:     Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PromoCode(Base):
+    __tablename__ = "promo_codes"
+
+    id:         Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    code:       Mapped[str]      = mapped_column(String(64), unique=True, index=True)
+    days:       Mapped[int]      = mapped_column(Integer, default=31)
+    max_uses:   Mapped[int|None] = mapped_column(Integer, nullable=True)
+    is_active:  Mapped[bool]     = mapped_column(Boolean, default=True)
+    uses_count: Mapped[int]      = mapped_column(Integer, default=0)
+    created_by: Mapped[int|None] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class PromoActivation(Base):
+    __tablename__ = "promo_activations"
+
+    id:             Mapped[int]      = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_id:    Mapped[int]      = mapped_column(BigInteger, index=True)
+    code:           Mapped[str]      = mapped_column(String(64), index=True)
+    days:           Mapped[int]      = mapped_column(Integer, default=31)
+    status:         Mapped[str]      = mapped_column(String(16), default="pending")
+    payment_method: Mapped[str|None] = mapped_column(String(32), nullable=True)
+    order_uuid:     Mapped[str|None] = mapped_column(String(96), nullable=True)
+    created_at:     Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    used_at:        Mapped[datetime|None] = mapped_column(DateTime, nullable=True)
 
 
 class Favorite(Base):
@@ -259,6 +301,7 @@ async def init_db():
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS badge VARCHAR(256)",
             "DO $$ BEGIN IF EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='users' AND column_name='badge' AND character_maximum_length=32) THEN ALTER TABLE users ALTER COLUMN badge TYPE VARCHAR(256); END IF; END $$",
             "CREATE TABLE IF NOT EXISTS custom_badges (id SERIAL PRIMARY KEY, name VARCHAR(32) UNIQUE, color VARCHAR(16), created_at TIMESTAMP DEFAULT NOW())",
+            "ALTER TABLE custom_badges ALTER COLUMN created_at SET DEFAULT NOW()",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS tier VARCHAR(16) DEFAULT 'plus'",
             "CREATE TABLE IF NOT EXISTS crypto_checkouts (id SERIAL PRIMARY KEY, order_uuid VARCHAR(64) UNIQUE, telegram_id BIGINT, tier VARCHAR(16) DEFAULT 'plus', crypto_amount NUMERIC(12,4), crypto_currency VARCHAR(16), network VARCHAR(32), wallet_address TEXT, tx_hash TEXT, status VARCHAR(16) DEFAULT 'pending', expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW())",
             "CREATE INDEX IF NOT EXISTS idx_crypto_checkouts_user ON crypto_checkouts (telegram_id)",
@@ -266,11 +309,20 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_watch_history_user ON watch_history (telegram_id, updated_at DESC)",
             "CREATE TABLE IF NOT EXISTS artist_follows (id SERIAL PRIMARY KEY, telegram_id BIGINT, artist_name VARCHAR(128), created_at TIMESTAMP DEFAULT NOW(), UNIQUE(telegram_id, artist_name))",
             "CREATE INDEX IF NOT EXISTS idx_artist_follows_user ON artist_follows (telegram_id)",
-            "INSERT INTO custom_badges (name, color) VALUES ('PLUS', '#FF7EC8') ON CONFLICT (name) DO NOTHING",
-            "INSERT INTO custom_badges (name, color) VALUES ('PRO', '#00E5FF') ON CONFLICT (name) DO NOTHING",
-            "INSERT INTO custom_badges (name, color) VALUES ('ELITE', '#FFD700') ON CONFLICT (name) DO NOTHING",
+            "INSERT INTO custom_badges (name, color, created_at) VALUES ('PLUS', '#FF7EC8', NOW()) ON CONFLICT (name) DO NOTHING",
+            "INSERT INTO custom_badges (name, color, created_at) VALUES ('PRO', '#00E5FF', NOW()) ON CONFLICT (name) DO NOTHING",
+            "INSERT INTO custom_badges (name, color, created_at) VALUES ('ELITE', '#FFD700', NOW()) ON CONFLICT (name) DO NOTHING",
             "CREATE TABLE IF NOT EXISTS pending_invites (id SERIAL PRIMARY KEY, telegram_id BIGINT, invite_link TEXT, used BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())",
             "CREATE INDEX IF NOT EXISTS idx_pending_invites_user ON pending_invites (telegram_id)",
+            "CREATE TABLE IF NOT EXISTS external_grants (id SERIAL PRIMARY KEY, source_project VARCHAR(32), order_uuid VARCHAR(96), telegram_id BIGINT, days INTEGER DEFAULT 31, tier VARCHAR(16) DEFAULT 'elite', created_at TIMESTAMP DEFAULT NOW(), CONSTRAINT uq_external_grant_source_order UNIQUE (source_project, order_uuid))",
+            "CREATE INDEX IF NOT EXISTS idx_external_grants_user ON external_grants (telegram_id)",
+            "CREATE TABLE IF NOT EXISTS promo_codes (id SERIAL PRIMARY KEY, code VARCHAR(64) UNIQUE, days INTEGER DEFAULT 31, is_active BOOLEAN DEFAULT TRUE, uses_count INTEGER DEFAULT 0, created_by BIGINT, created_at TIMESTAMP DEFAULT NOW())",
+            "CREATE INDEX IF NOT EXISTS idx_promo_codes_code ON promo_codes (code)",
+            "ALTER TABLE promo_codes ADD COLUMN IF NOT EXISTS max_uses INTEGER",
+            "CREATE TABLE IF NOT EXISTS promo_activations (id SERIAL PRIMARY KEY, telegram_id BIGINT, code VARCHAR(64), days INTEGER DEFAULT 31, status VARCHAR(16) DEFAULT 'pending', payment_method VARCHAR(32), order_uuid VARCHAR(96), created_at TIMESTAMP DEFAULT NOW(), used_at TIMESTAMP)",
+            "CREATE INDEX IF NOT EXISTS idx_promo_activations_user ON promo_activations (telegram_id, status, created_at DESC)",
+            "ALTER TABLE crypto_checkouts ADD COLUMN IF NOT EXISTS promo_code VARCHAR(64)",
+            "ALTER TABLE crypto_checkouts ADD COLUMN IF NOT EXISTS promo_days INTEGER DEFAULT 31",
         ]
         for sql in migrations:
             try:
@@ -278,6 +330,21 @@ async def init_db():
                     await conn.execute(text(sql))
             except Exception as e:
                 logger.warning(f"Migration warning for {sql!r}: {e}")
+    else:
+        sqlite_migrations = [
+            "CREATE TABLE IF NOT EXISTS crypto_checkouts (id INTEGER PRIMARY KEY AUTOINCREMENT, order_uuid VARCHAR(64) UNIQUE, telegram_id BIGINT, tier VARCHAR(16) DEFAULT 'plus', crypto_amount NUMERIC(12,4), crypto_currency VARCHAR(16), network VARCHAR(32), wallet_address TEXT, tx_hash TEXT, status VARCHAR(16) DEFAULT 'pending', expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, promo_code VARCHAR(64), promo_days INTEGER DEFAULT 31)",
+            "CREATE INDEX IF NOT EXISTS idx_crypto_checkouts_user ON crypto_checkouts (telegram_id)",
+            "ALTER TABLE crypto_checkouts ADD COLUMN promo_code VARCHAR(64)",
+            "ALTER TABLE crypto_checkouts ADD COLUMN promo_days INTEGER DEFAULT 31",
+            "ALTER TABLE promo_codes ADD COLUMN max_uses INTEGER",
+        ]
+        for sql in sqlite_migrations:
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(text(sql))
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    logger.warning(f"Migration warning for {sql!r}: {e}")
 
     # Заполняем thumbnail_url для старых видео без превью
     await _backfill_thumbnails()
@@ -341,6 +408,220 @@ async def get_or_create_user(session: AsyncSession, telegram_id: int, username: 
         await session.commit()
         await session.refresh(user)
     return user
+
+
+# ─── Promo codes ─────────────────────────────────────────────────────────────
+
+PROMO_CODE_RE = re.compile(r"^[A-Z0-9_-]{2,64}$")
+
+def normalize_promo_code(code: str | None) -> str:
+    return (code or "").strip().upper()
+
+
+def _validate_promo_code(code: str) -> str:
+    normalized = normalize_promo_code(code)
+    if not PROMO_CODE_RE.fullmatch(normalized):
+        raise ValueError("Promo code must be 2-64 chars: A-Z, 0-9, _ or -")
+    return normalized
+
+
+def _safe_promo_days(days: int) -> int:
+    try:
+        value = int(days)
+    except Exception:
+        value = 31
+    return max(1, min(3660, value))
+
+
+def _safe_promo_max_uses(max_uses: int | None) -> int | None:
+    if max_uses in (None, ""):
+        return None
+    try:
+        value = int(max_uses)
+    except Exception:
+        return None
+    return max(1, min(1_000_000, value))
+
+
+async def create_or_update_promo_code(
+    session: AsyncSession,
+    *,
+    code: str,
+    days: int,
+    max_uses: int | None = None,
+    created_by: int | None = None,
+) -> tuple[PromoCode, bool]:
+    from sqlalchemy import select
+
+    normalized = _validate_promo_code(code)
+    safe_days = _safe_promo_days(days)
+    safe_max_uses = _safe_promo_max_uses(max_uses)
+    result = await session.execute(select(PromoCode).where(PromoCode.code == normalized))
+    promo = result.scalar_one_or_none()
+    created = promo is None
+    if promo:
+        promo.days = safe_days
+        promo.max_uses = safe_max_uses
+        promo.is_active = True
+    else:
+        promo = PromoCode(
+            code=normalized,
+            days=safe_days,
+            max_uses=safe_max_uses,
+            is_active=True,
+            created_by=created_by,
+        )
+        session.add(promo)
+    await session.commit()
+    await session.refresh(promo)
+    return promo, created
+
+
+async def activate_promo_code(
+    session: AsyncSession,
+    *,
+    telegram_id: int,
+    code: str,
+) -> PromoActivation:
+    from sqlalchemy import select
+
+    normalized = _validate_promo_code(code)
+    result = await session.execute(
+        select(PromoCode).where(PromoCode.code == normalized, PromoCode.is_active == True)
+    )
+    promo = result.scalar_one_or_none()
+    if not promo:
+        raise ValueError("Promo code not found or inactive")
+
+    pending_result = await session.execute(
+        select(PromoActivation).where(
+            PromoActivation.telegram_id == int(telegram_id),
+            PromoActivation.status == "pending",
+        )
+    )
+    pending_activations = list(pending_result.scalars().all())
+    for activation in pending_activations:
+        if activation.code == promo.code:
+            activation.days = _safe_promo_days(promo.days)
+            await session.commit()
+            await session.refresh(activation)
+            return activation
+
+    if promo.max_uses is not None:
+        active_result = await session.execute(
+            select(func.count(PromoActivation.id)).where(
+                PromoActivation.code == promo.code,
+                PromoActivation.status == "pending",
+            )
+        )
+        active_slots = active_result.scalar() or 0
+        used_or_reserved = (promo.uses_count or 0) + int(active_slots)
+        if used_or_reserved >= promo.max_uses:
+            raise ValueError("Promo code usage limit reached")
+
+    for activation in pending_activations:
+        activation.status = "replaced"
+
+    activation = PromoActivation(
+        telegram_id=int(telegram_id),
+        code=promo.code,
+        days=_safe_promo_days(promo.days),
+        status="pending",
+    )
+    session.add(activation)
+    await session.commit()
+    await session.refresh(activation)
+    return activation
+
+
+async def get_active_promo_activation(
+    session: AsyncSession,
+    telegram_id: int,
+) -> PromoActivation | None:
+    from sqlalchemy import select
+
+    result = await session.execute(
+        select(PromoActivation)
+        .where(
+            PromoActivation.telegram_id == int(telegram_id),
+            PromoActivation.status == "pending",
+        )
+        .order_by(PromoActivation.created_at.desc(), PromoActivation.id.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def mark_promo_code_used(
+    session: AsyncSession,
+    *,
+    telegram_id: int,
+    code: str,
+    days: int,
+    payment_method: str,
+    order_uuid: str,
+) -> None:
+    from sqlalchemy import select
+
+    normalized = normalize_promo_code(code)
+    if not normalized:
+        return
+
+    activation_result = await session.execute(
+        select(PromoActivation)
+        .where(
+            PromoActivation.telegram_id == int(telegram_id),
+            PromoActivation.code == normalized,
+            PromoActivation.status == "pending",
+        )
+        .order_by(PromoActivation.created_at.desc(), PromoActivation.id.desc())
+        .limit(1)
+    )
+    activation = activation_result.scalar_one_or_none()
+    if activation:
+        activation.status = "used"
+        activation.payment_method = payment_method[:32]
+        activation.order_uuid = (order_uuid or "")[:96]
+        activation.used_at = datetime.utcnow()
+    else:
+        session.add(PromoActivation(
+            telegram_id=int(telegram_id),
+            code=normalized,
+            days=_safe_promo_days(days),
+            status="used",
+            payment_method=payment_method[:32],
+            order_uuid=(order_uuid or "")[:96],
+            used_at=datetime.utcnow(),
+        ))
+
+    promo_result = await session.execute(select(PromoCode).where(PromoCode.code == normalized))
+    promo = promo_result.scalar_one_or_none()
+    if promo:
+        promo.uses_count = (promo.uses_count or 0) + 1
+
+
+async def consume_active_promo_days(
+    session: AsyncSession,
+    *,
+    telegram_id: int,
+    default_days: int = 31,
+    payment_method: str,
+    order_uuid: str,
+) -> tuple[int, str | None]:
+    activation = await get_active_promo_activation(session, telegram_id)
+    if not activation:
+        return _safe_promo_days(default_days), None
+
+    days = _safe_promo_days(activation.days)
+    await mark_promo_code_used(
+        session,
+        telegram_id=telegram_id,
+        code=activation.code,
+        days=days,
+        payment_method=payment_method,
+        order_uuid=order_uuid,
+    )
+    return days, activation.code
 
 
 # ─── Artist functions ─────────────────────────────────────────────────────────
@@ -599,6 +880,67 @@ def assign_tier_badge(user: "User") -> None:
     if new_badge:
         current.append(new_badge)
     user.badge = ','.join(current) if current else None
+
+
+async def apply_external_grant(
+    session: AsyncSession,
+    *,
+    source_project: str,
+    order_uuid: str,
+    telegram_id: int,
+    days: int = 31,
+    tier: str = "elite",
+    username: str | None = None,
+    full_name: str | None = None,
+    payment_method: str = "elite_sync",
+) -> tuple[bool, User]:
+    """Apply a cross-bot grant once. Returns (applied_now, user)."""
+    from sqlalchemy import select
+
+    source_project = (source_project or "external").strip()[:32]
+    order_uuid = (order_uuid or "").strip()[:96]
+    if not order_uuid:
+        raise ValueError("order_uuid is required for an external grant")
+
+    existing = await session.execute(
+        select(ExternalGrant).where(
+            ExternalGrant.source_project == source_project,
+            ExternalGrant.order_uuid == order_uuid,
+        )
+    )
+    grant = existing.scalar_one_or_none()
+    if grant:
+        user = await get_or_create_user(session, telegram_id, username=username, full_name=full_name)
+        return False, user
+
+    safe_days = max(1, min(3660, int(days or 31)))
+    safe_tier = (tier or "elite").lower()
+    if safe_tier not in {"plus", "pro", "elite", "free"}:
+        safe_tier = "elite"
+
+    user = await get_or_create_user(session, telegram_id, username=username, full_name=full_name)
+    if username and not user.username:
+        user.username = username
+    if full_name and not user.full_name:
+        user.full_name = full_name
+
+    base = max(0, user.units or 0)
+    user.units = base + safe_days
+    user.is_active = True
+    user.last_payment_method = payment_method
+    user.tier = safe_tier
+    assign_tier_badge(user)
+
+    session.add(ExternalGrant(
+        source_project=source_project,
+        order_uuid=order_uuid,
+        telegram_id=telegram_id,
+        days=safe_days,
+        tier=safe_tier,
+    ))
+    await session.commit()
+    await session.refresh(user)
+    return True, user
 
 
 # ─── PendingInvite CRUD ───────────────────────────────────────────────────────

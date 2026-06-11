@@ -1797,15 +1797,28 @@ async def api_continue_watching(request: web.Request) -> web.Response:
 
 
 async def api_search(request: web.Request) -> web.Response:
-    """GET /miniapp/search?q=TEXT&limit=20"""
+    """GET /miniapp/search?q=TEXT&limit=20&order=newest|random&seed=N
+
+    `order=random` returns a deterministic shuffle of all rows matching
+    the query (md5(id::text || seed)) — same pattern as /miniapp/videos.
+    Used by the Home → Browse category page so tapping a tag surfaces a
+    fresh sample each time the user taps Refresh.
+    Default order is newest-first, so the free-text search path stays
+    unchanged.
+    """
     q     = request.query.get("q", "").strip()
     limit = min(int(request.query.get("limit", 20)), 50)
+    order = request.query.get("order", "newest").lower()
+    try:
+        seed = int(request.query.get("seed", 0))
+    except (TypeError, ValueError):
+        seed = 0
     if len(q) < 2:
         return web.json_response({"results": []})
 
     from sqlalchemy import or_
     async with async_session() as session:
-        result = await session.execute(
+        stmt = (
             select(ArtistContent)
             .where(ArtistContent.content_type == "video")
             .where(or_(
@@ -1813,9 +1826,16 @@ async def api_search(request: web.Request) -> web.Response:
                 ArtistContent.artist_name.ilike(f"%{q}%"),
                 ArtistContent.tags.ilike(f"%{q}%"),
             ))
-            .order_by(ArtistContent.created_at.desc())
-            .limit(limit)
         )
+        if order == "random":
+            stmt = stmt.order_by(
+                sa_text("md5(id::text || :__shuffle_seed)").bindparams(
+                    __shuffle_seed=str(seed)
+                )
+            )
+        else:
+            stmt = stmt.order_by(ArtistContent.created_at.desc())
+        result = await session.execute(stmt.limit(limit))
         items = result.scalars().all()
 
     return web.json_response({"results": [

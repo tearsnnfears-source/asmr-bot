@@ -477,6 +477,55 @@ async def create_or_update_promo_code(
     return promo, created
 
 
+async def list_promo_codes(session: AsyncSession) -> list[PromoCode]:
+    from sqlalchemy import select
+
+    result = await session.execute(
+        select(PromoCode).order_by(PromoCode.is_active.desc(), PromoCode.created_at.desc(), PromoCode.code)
+    )
+    return list(result.scalars().all())
+
+
+async def deactivate_promo_code(session: AsyncSession, code: str) -> tuple[PromoCode | None, int]:
+    from sqlalchemy import select
+
+    normalized = _validate_promo_code(code)
+    result = await session.execute(select(PromoCode).where(PromoCode.code == normalized))
+    promo = result.scalar_one_or_none()
+    if not promo:
+        return None, 0
+
+    promo.is_active = False
+
+    pending_result = await session.execute(
+        select(PromoActivation).where(
+            PromoActivation.code == normalized,
+            PromoActivation.status == "pending",
+        )
+    )
+    pending = list(pending_result.scalars().all())
+    for activation in pending:
+        activation.status = "cancelled"
+
+    # If a crypto invoice was created with this promo but is not paid yet,
+    # make that checkout fall back to the regular 31 days.
+    try:
+        await session.execute(
+            text(
+                "UPDATE crypto_checkouts "
+                "SET promo_code = NULL, promo_days = 31 "
+                "WHERE promo_code = :code AND status = 'pending'"
+            ),
+            {"code": normalized},
+        )
+    except Exception as e:
+        logger.warning("Could not clear pending crypto promo %s: %s", normalized, e)
+
+    await session.commit()
+    await session.refresh(promo)
+    return promo, len(pending)
+
+
 async def activate_promo_code(
     session: AsyncSession,
     *,

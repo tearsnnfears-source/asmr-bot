@@ -4,9 +4,9 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
-from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts, Tag, get_all_tags, get_tag, create_tag, delete_tag, CustomBadge, create_custom_badge, get_custom_badges, delete_custom_badge, assign_tier_badge, create_or_update_promo_code
+from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts, Tag, get_all_tags, get_tag, create_tag, delete_tag, CustomBadge, create_custom_badge, get_custom_badges, delete_custom_badge, assign_tier_badge, create_or_update_promo_code, list_promo_codes, deactivate_promo_code, PromoActivation
 from handlers.group import enable_night_mode, disable_night_mode
 from config import ADMIN_IDS, GROUP_ID, INVITE_LINK
 
@@ -214,6 +214,85 @@ async def cmd_create_code(message: Message, session: AsyncSession):
     )
 
 
+@router.message(Command("codes"))
+async def cmd_codes(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+
+    promos = await list_promo_codes(session)
+    if not promos:
+        await message.reply("Промокодов пока нет.\nСоздать: <code>/create_code LEAK 75 50</code>", parse_mode="HTML")
+        return
+
+    pending_result = await session.execute(
+        select(PromoActivation.code, func.count(PromoActivation.id))
+        .where(PromoActivation.status == "pending")
+        .group_by(PromoActivation.code)
+    )
+    pending_counts = {code: int(count or 0) for code, count in pending_result.all()}
+
+    lines = []
+    for promo in promos:
+        status = "✅" if promo.is_active else "🚫"
+        used = int(promo.uses_count or 0)
+        pending = pending_counts.get(promo.code, 0)
+        if promo.max_uses is None:
+            limit_text = "без лимита"
+            left_text = "∞"
+        else:
+            limit_text = str(promo.max_uses)
+            left_text = str(max(0, int(promo.max_uses) - used - pending))
+        created = promo.created_at.strftime("%d.%m %H:%M") if promo.created_at else "—"
+        lines.append(
+            f"{status} <code>{promo.code}</code> — <b>{promo.days}д</b>\n"
+            f"   Лимит: <b>{limit_text}</b> | использовано: <b>{used}</b> | pending: <b>{pending}</b> | осталось: <b>{left_text}</b>\n"
+            f"   Создан: {created}"
+        )
+
+    header = f"🎟 <b>Промокоды: {len(promos)}</b>\n\n"
+    chunk = []
+    for line in lines:
+        chunk.append(line)
+        if len(chunk) >= 12:
+            await message.answer(header + "\n\n".join(chunk), parse_mode="HTML")
+            header = ""
+            chunk = []
+    if chunk:
+        await message.answer(header + "\n\n".join(chunk), parse_mode="HTML")
+
+
+@router.message(Command("del_code"))
+async def cmd_del_code(message: Message, session: AsyncSession):
+    if not is_admin(message.from_user.id):
+        return
+
+    args = message.text.split()[1:]
+    if len(args) != 1:
+        await message.reply("Использование: <code>/del_code LEAK</code>", parse_mode="HTML")
+        return
+
+    try:
+        promo, cancelled = await deactivate_promo_code(session, args[0])
+    except ValueError as e:
+        await message.reply(f"❌ {e}", parse_mode="HTML")
+        return
+
+    if not promo:
+        await message.reply("❌ Промокод не найден.", parse_mode="HTML")
+        return
+
+    restore_cmd = f"/create_code {promo.code} {promo.days}"
+    if promo.max_uses is not None:
+        restore_cmd += f" {promo.max_uses}"
+
+    await message.reply(
+        f"🚫 Промокод <code>{promo.code}</code> отключён.\n"
+        f"Pending-активаций отменено: <b>{cancelled}</b>\n\n"
+        f"Вернуть можно командой: <code>{restore_cmd}</code>",
+        parse_mode="HTML",
+    )
+
+
 # ─── /admin_help ─────────────────────────────────────────────────────────────
 
 @router.message(Command("admin_help"))
@@ -250,6 +329,8 @@ async def cmd_admin_help(message: Message):
         "/sync_tier_badges — выдать бейджи PLUS/PRO/ELITE всем по тиру\n"
         "/fix_grace — убрать grace у не-tribute пользователей (одноразово)\n"
         "/create_code [CODE] [дней] [лимит] — промокод на дни после оплаты\n"
+        "/codes — список всех промокодов\n"
+        "/del_code [CODE] — отключить промокод\n"
         "   plus — стандарт (€6), pro — расширенный (€8), elite — скоро\n\n"
         "🎨 <b>Артисты и контент:</b>\n"
         "/set_cont — управление артистами\n"

@@ -1048,7 +1048,18 @@ def _cryptocloud_invoice_ref(value: str | None) -> str:
             raw = (parsed.path or "").strip("/").split("/")[-1]
     except Exception:
         pass
+    if "://" not in raw and "/" in raw:
+        maybe_host, _, maybe_path = raw.partition("/")
+        if "." in maybe_host and maybe_path:
+            raw = maybe_path.strip("/").split("/")[-1]
     raw = raw.split("?", 1)[0].strip().strip("/")
+    if not raw or raw.lower() == "none":
+        return ""
+    if raw.upper().startswith("INV-"):
+        suffix = raw[4:].strip()
+        return f"INV-{suffix}" if suffix else ""
+    if raw.replace("_", "").replace("-", "").isalnum():
+        return f"INV-{raw}"
     return raw
 
 
@@ -1064,6 +1075,15 @@ def _cryptocloud_payload_invoice_ref(payload: dict | None, row: dict | None = No
     ):
         ref = _cryptocloud_invoice_ref(str(value) if value is not None else "")
         if ref and ref.lower() != "none":
+            return ref
+    return ""
+
+
+def _cryptocloud_row_invoice_ref(row: dict | None) -> str:
+    row = row or {}
+    for value in (row.get("tx_hash"), row.get("wallet_address")):
+        ref = _cryptocloud_invoice_ref(str(value) if value is not None else "")
+        if ref:
             return ref
     return ""
 
@@ -1088,6 +1108,7 @@ def _cryptocloud_payload_is_success(payload: dict | None) -> bool:
     info_status = str(invoice_info.get("status") or "").lower()
     return (
         status in CRYPTOCLOUD_SUCCESS_STATUSES
+        or status in CRYPTOCLOUD_PAID_STATUSES
         or invoice_status in CRYPTOCLOUD_SUCCESS_STATUSES
         or info_status in CRYPTOCLOUD_PAID_STATUSES
     )
@@ -1429,8 +1450,10 @@ async def api_cryptocloud_checkout(request: web.Request) -> web.Response:
         return web.json_response({"error": "Cryptocloud rejected the invoice"}, status=502)
 
     result = resp_json.get("result") or {}
-    pay_url     = result.get("link", "")
-    invoice_uuid = result.get("uuid", "")
+    pay_url = str(result.get("link") or "")
+    if pay_url and not urllib.parse.urlparse(pay_url).scheme:
+        pay_url = "https://" + pay_url.lstrip("/")
+    invoice_uuid = _cryptocloud_invoice_ref(result.get("uuid") or result.get("invoice_id") or pay_url)
     if not pay_url:
         logger.error(f"Cryptocloud missing link in result: {result}")
         return web.json_response({"error": "Cryptocloud missing payment link"}, status=502)
@@ -1441,12 +1464,12 @@ async def api_cryptocloud_checkout(request: web.Request) -> web.Response:
         async with async_session() as session:
             await session.execute(
                 sa_text(
-                    "INSERT INTO crypto_checkouts (order_uuid, telegram_id, tier, crypto_amount, crypto_currency, network, wallet_address, status, expires_at, promo_code, promo_days) "
-                    "VALUES (:uuid, :tid, :tier, :amount, 'USD', 'cryptocloud', :url, 'pending', :exp, :promo_code, :promo_days)"
+                    "INSERT INTO crypto_checkouts (order_uuid, telegram_id, tier, crypto_amount, crypto_currency, network, wallet_address, tx_hash, status, expires_at, promo_code, promo_days) "
+                    "VALUES (:uuid, :tid, :tier, :amount, 'USD', 'cryptocloud', :url, :invoice_uuid, 'pending', :exp, :promo_code, :promo_days)"
                 ),
                 {"uuid": order_id, "tid": user_id, "tier": tier,
                  "amount": amount, "url": pay_url, "exp": expires_at,
-                 "promo_code": applied_promo_code, "promo_days": promo_days},
+                 "invoice_uuid": invoice_uuid, "promo_code": applied_promo_code, "promo_days": promo_days},
             )
             await session.commit()
     except Exception as e:
@@ -1496,8 +1519,6 @@ async def cryptocloud_postback(request: web.Request) -> web.Response:
         return web.Response(status=400, text="bad body")
 
     token_state = _cryptocloud_token_is_valid(payload.get("token"))
-    if token_state is False:
-        return web.Response(status=403, text="bad signature")
 
     order_id = str(payload.get("order_id") or "").strip()
     if not order_id:
@@ -1505,7 +1526,12 @@ async def cryptocloud_postback(request: web.Request) -> web.Response:
         return web.json_response({"status": "ignored"})
 
     invoice_info = payload.get("invoice_info") if isinstance(payload.get("invoice_info"), dict) else None
-    if token_state is not True:
+    if token_state is True:
+        if not _cryptocloud_payload_is_success(payload):
+            status = payload.get("status") or ""
+            logger.info("Cryptocloud postback non-success status=%s order=%s", status, order_id)
+            return web.json_response({"status": "ignored"})
+    else:
         async with async_session() as session:
             row_result = await session.execute(
                 sa_text("SELECT * FROM crypto_checkouts WHERE order_uuid = :uuid"),
@@ -1515,15 +1541,21 @@ async def cryptocloud_postback(request: web.Request) -> web.Response:
             if not row:
                 logger.warning("Cryptocloud postback for unknown order_id=%s", order_id)
                 return web.json_response({"status": "ignored"})
-            invoice_ref = _cryptocloud_payload_invoice_ref(payload, row)
+            row = dict(row)
+            invoice_ref = _cryptocloud_row_invoice_ref(row)
+            if not invoice_ref and token_state is not False:
+                invoice_ref = _cryptocloud_payload_invoice_ref(payload, None)
+            if not invoice_ref:
+                logger.warning("Cryptocloud postback cannot verify invoice ref order=%s", order_id)
+                if token_state is False:
+                    return web.Response(status=403, text="bad signature")
+                return web.json_response({"status": "ignored"})
+            if token_state is False:
+                logger.warning("Cryptocloud postback JWT failed; verifying order=%s through merchant/info", order_id)
         invoice_info = await _fetch_cryptocloud_invoice_info(invoice_ref)
         if _cryptocloud_status_from_info(invoice_info) != "success":
             logger.info("Cryptocloud postback not confirmed by API order=%s status=%s", order_id, _cryptocloud_status_from_info(invoice_info))
             return web.json_response({"status": "ignored"})
-    elif not _cryptocloud_payload_is_success(payload):
-        status = payload.get("status") or ""
-        logger.info("Cryptocloud postback non-success status=%s order=%s", status, order_id)
-        return web.json_response({"status": "ignored"})
 
     result = await _credit_cryptocloud_order(
         order_id=order_id,
@@ -1585,6 +1617,51 @@ async def api_cryptocloud_status(request: web.Request) -> web.Response:
         "invite_link": result.get("invite_link"),
         "days_left": result.get("days_left"),
     })
+
+
+async def reconcile_pending_cryptocloud_orders(limit: int = 25, max_age_hours: int = 72) -> dict:
+    """Poll CryptoCloud for recent pending invoices and credit paid ones.
+
+    This is a safety net for missed postbacks and users who close the miniapp
+    before its client-side polling sees a paid status.
+    """
+    if not CRYPTOCLOUD_API_KEY:
+        return {"checked": 0, "confirmed": 0, "reason": "no-api-key"}
+
+    cutoff = _dt.utcnow() - timedelta(hours=max(1, max_age_hours))
+    async with async_session() as session:
+        rows_result = await session.execute(
+            sa_text(
+                "SELECT order_uuid, tx_hash, wallet_address FROM crypto_checkouts "
+                "WHERE status = 'pending' AND network = 'cryptocloud' AND created_at >= :cutoff "
+                "ORDER BY created_at ASC LIMIT :limit"
+            ),
+            {"cutoff": cutoff, "limit": max(1, min(100, int(limit or 25)))},
+        )
+        rows = [dict(row) for row in rows_result.mappings().all()]
+
+    checked = 0
+    confirmed = 0
+    for row in rows:
+        order_id = str(row.get("order_uuid") or "")
+        invoice_ref = _cryptocloud_row_invoice_ref(row)
+        if not order_id or not invoice_ref:
+            continue
+        checked += 1
+        invoice_info = await _fetch_cryptocloud_invoice_info(invoice_ref)
+        if _cryptocloud_status_from_info(invoice_info) != "success":
+            continue
+        result = await _credit_cryptocloud_order(
+            order_id=order_id,
+            invoice_info=invoice_info,
+            source="reconcile",
+        )
+        if result.get("ok") and not result.get("already_confirmed"):
+            confirmed += 1
+
+    if checked or confirmed:
+        logger.info("Cryptocloud reconcile checked=%s confirmed=%s", checked, confirmed)
+    return {"checked": checked, "confirmed": confirmed}
 
 
 async def api_get_recommended(request: web.Request) -> web.Response:

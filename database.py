@@ -303,8 +303,6 @@ async def init_db():
             "CREATE TABLE IF NOT EXISTS custom_badges (id SERIAL PRIMARY KEY, name VARCHAR(32) UNIQUE, color VARCHAR(16), created_at TIMESTAMP DEFAULT NOW())",
             "ALTER TABLE custom_badges ALTER COLUMN created_at SET DEFAULT NOW()",
             "ALTER TABLE users ADD COLUMN IF NOT EXISTS tier VARCHAR(16) DEFAULT 'plus'",
-            "CREATE TABLE IF NOT EXISTS crypto_checkouts (id SERIAL PRIMARY KEY, order_uuid VARCHAR(64) UNIQUE, telegram_id BIGINT, tier VARCHAR(16) DEFAULT 'plus', crypto_amount NUMERIC(12,4), crypto_currency VARCHAR(16), network VARCHAR(32), wallet_address TEXT, tx_hash TEXT, status VARCHAR(16) DEFAULT 'pending', expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT NOW())",
-            "CREATE INDEX IF NOT EXISTS idx_crypto_checkouts_user ON crypto_checkouts (telegram_id)",
             "CREATE TABLE IF NOT EXISTS watch_history (id SERIAL PRIMARY KEY, telegram_id BIGINT, content_id INTEGER, progress_seconds INTEGER DEFAULT 0, duration_seconds INTEGER DEFAULT 0, updated_at TIMESTAMP DEFAULT NOW(), UNIQUE(telegram_id, content_id))",
             "CREATE INDEX IF NOT EXISTS idx_watch_history_user ON watch_history (telegram_id, updated_at DESC)",
             "CREATE TABLE IF NOT EXISTS artist_follows (id SERIAL PRIMARY KEY, telegram_id BIGINT, artist_name VARCHAR(128), created_at TIMESTAMP DEFAULT NOW(), UNIQUE(telegram_id, artist_name))",
@@ -321,8 +319,6 @@ async def init_db():
             "ALTER TABLE promo_codes ADD COLUMN IF NOT EXISTS max_uses INTEGER",
             "CREATE TABLE IF NOT EXISTS promo_activations (id SERIAL PRIMARY KEY, telegram_id BIGINT, code VARCHAR(64), days INTEGER DEFAULT 31, status VARCHAR(16) DEFAULT 'pending', payment_method VARCHAR(32), order_uuid VARCHAR(96), created_at TIMESTAMP DEFAULT NOW(), used_at TIMESTAMP)",
             "CREATE INDEX IF NOT EXISTS idx_promo_activations_user ON promo_activations (telegram_id, status, created_at DESC)",
-            "ALTER TABLE crypto_checkouts ADD COLUMN IF NOT EXISTS promo_code VARCHAR(64)",
-            "ALTER TABLE crypto_checkouts ADD COLUMN IF NOT EXISTS promo_days INTEGER DEFAULT 31",
         ]
         for sql in migrations:
             try:
@@ -332,10 +328,6 @@ async def init_db():
                 logger.warning(f"Migration warning for {sql!r}: {e}")
     else:
         sqlite_migrations = [
-            "CREATE TABLE IF NOT EXISTS crypto_checkouts (id INTEGER PRIMARY KEY AUTOINCREMENT, order_uuid VARCHAR(64) UNIQUE, telegram_id BIGINT, tier VARCHAR(16) DEFAULT 'plus', crypto_amount NUMERIC(12,4), crypto_currency VARCHAR(16), network VARCHAR(32), wallet_address TEXT, tx_hash TEXT, status VARCHAR(16) DEFAULT 'pending', expires_at TIMESTAMP, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, promo_code VARCHAR(64), promo_days INTEGER DEFAULT 31)",
-            "CREATE INDEX IF NOT EXISTS idx_crypto_checkouts_user ON crypto_checkouts (telegram_id)",
-            "ALTER TABLE crypto_checkouts ADD COLUMN promo_code VARCHAR(64)",
-            "ALTER TABLE crypto_checkouts ADD COLUMN promo_days INTEGER DEFAULT 31",
             "ALTER TABLE promo_codes ADD COLUMN max_uses INTEGER",
         ]
         for sql in sqlite_migrations:
@@ -506,20 +498,6 @@ async def deactivate_promo_code(session: AsyncSession, code: str) -> tuple[Promo
     pending = list(pending_result.scalars().all())
     for activation in pending:
         activation.status = "cancelled"
-
-    # If a crypto invoice was created with this promo but is not paid yet,
-    # make that checkout fall back to the regular 31 days.
-    try:
-        await session.execute(
-            text(
-                "UPDATE crypto_checkouts "
-                "SET promo_code = NULL, promo_days = 31 "
-                "WHERE promo_code = :code AND status = 'pending'"
-            ),
-            {"code": normalized},
-        )
-    except Exception as e:
-        logger.warning("Could not clear pending crypto promo %s: %s", normalized, e)
 
     await session.commit()
     await session.refresh(promo)

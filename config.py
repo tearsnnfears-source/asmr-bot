@@ -59,19 +59,6 @@ CRYPTO_WALLET_USDT_TRC20 = os.getenv("CRYPTO_WALLET_USDT_TRC20", "")
 CRYPTO_WALLET_USDT_TON   = os.getenv("CRYPTO_WALLET_USDT_TON",   "")
 CRYPTO_WALLET_ETH         = os.getenv("CRYPTO_WALLET_ETH",        "")
 
-# Crypto prices in USD per tier (used as `amount` for Cryptocloud invoice)
-CRYPTO_USDT_PRICES = {
-    'plus':  6,
-    'pro':   8,
-    'elite': 10,
-}
-
-# Cryptocloud (https://cryptocloud.plus) — hosted crypto checkout
-CRYPTOCLOUD_API_KEY = os.getenv("CRYPTOCLOUD_API_KEY", "")
-CRYPTOCLOUD_SHOP_ID = os.getenv("CRYPTOCLOUD_SHOP_ID", "")
-CRYPTOCLOUD_SECRET  = os.getenv("CRYPTOCLOUD_SECRET", "")  # HS256 secret for postback JWT verification
-CRYPTOCLOUD_API_URL = os.getenv("CRYPTOCLOUD_API_URL", "https://api.cryptocloud.plus/v2/invoice/create")
-CRYPTOCLOUD_INFO_URL = os.getenv("CRYPTOCLOUD_INFO_URL", "https://api.cryptocloud.plus/v2/invoice/merchant/info")
 
 # Cross-bot ELITE sync. The receiving bot checks INTERNAL_GRANT_SECRET.
 # The sending bot posts to PEER_GRANT_URL using PEER_GRANT_SECRET.

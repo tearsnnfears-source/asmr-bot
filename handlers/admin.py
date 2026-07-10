@@ -980,9 +980,7 @@ async def cmd_set_tier(message: Message, session: AsyncSession):
 
 
 # ─── /confirm_crypto ─────────────────────────────────────────────────────────
-# Crypto-оплата теперь идёт через Cryptocloud (см. webhook.py /miniapp/cryptocloud/*).
-# Подтверждение приходит автоматически по postback; ручная команда удалена.
-
+# Crypto payments are handled manually via admin chat; no automatic provider flow.
 
 # ─── /fix_grace — одноразовая очистка неправильного grace period ─────────────
 

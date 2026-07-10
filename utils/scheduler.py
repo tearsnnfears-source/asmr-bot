@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -17,7 +16,7 @@ logger = logging.getLogger(__name__)
 async def cryptocloud_reconcile_job():
     try:
         from webhook import reconcile_pending_cryptocloud_orders
-        await reconcile_pending_cryptocloud_orders()
+        await reconcile_pending_cryptocloud_orders(limit=5, max_age_hours=24)
     except Exception as e:
         logger.warning("Cryptocloud reconcile job failed: %s", e)
 
@@ -188,7 +187,6 @@ def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
         id="cryptocloud_reconcile",
         max_instances=1,
         coalesce=True,
-        next_run_time=datetime.now(scheduler.timezone),
     )
 
     # Включение ночного режима (раскомментировать при необходимости)

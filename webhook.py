@@ -487,6 +487,8 @@ async def api_create_stars_invoice(request: web.Request) -> web.Response:
             currency="XTR",
             prices=[LabeledPrice(label=f"{days} Days VIP", amount=stars)]
         )
+        if invoice_link.startswith("https://telegram.me/"):
+            invoice_link = "https://t.me/" + invoice_link[len("https://telegram.me/"):]
         return web.json_response({
             "invoice_link": invoice_link,
             "stars": stars,

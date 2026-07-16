@@ -1,5 +1,6 @@
 import logging
 from aiogram import Router, F, Bot
+from aiogram.enums import ChatMemberStatus
 from aiogram.types import Message, ChatMemberUpdated, ChatPermissions
 from aiogram.filters import ChatMemberUpdatedFilter, JOIN_TRANSITION
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,12 +52,22 @@ async def anti_link(message: Message, bot: Bot):
     if not message.from_user or message.from_user.id in ADMIN_IDS:
         return
 
-    # Проверяем статус в группе
+    # Anonymous admins are represented as messages sent by the group itself.
+    if message.sender_chat and message.sender_chat.id == message.chat.id:
+        return
+
+    # Check the sender's status in the chat where the message was posted.
     try:
-        member = await bot.get_chat_member(GROUP_ID, message.from_user.id)
-        if member.status in ("administrator", "creator"):
+        member = await bot.get_chat_member(message.chat.id, message.from_user.id)
+        if member.status in (
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.CREATOR,
+        ):
             return
-    except Exception:
+    except Exception as e:
+        logger.warning(
+            f"Cannot check member status for {message.from_user.id}: {e}"
+        )
         return
 
     entities = message.entities or message.caption_entities or []

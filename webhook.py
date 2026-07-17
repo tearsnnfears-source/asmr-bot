@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -10,16 +11,38 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select, text as sa_text, func as sa_func, or_ as sa_or
 
-from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, activate_promo_code, get_active_promo_activation, consume_active_promo_days, normalize_promo_code, _auto_thumbnail
+from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, activate_promo_code, get_active_promo_activation, consume_active_promo_days, claim_tribute_webhook_event, normalize_promo_code, _auto_thumbnail
 from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, PROJECT_KEY, PEER_GRANT_URL, PEER_GRANT_SECRET
 
 logger = logging.getLogger(__name__)
+_background_tasks: set[asyncio.Task] = set()
 
 INIT_DATA_MAX_AGE_SECONDS = 24 * 60 * 60
 MINIAPP_STARS_PLANS = {
     "plus": {"days": 31, "stars": STARS_TIER_PRICES["plus"]},
     "pro": {"days": 31, "stars": STARS_TIER_PRICES["pro"]},
 }
+
+
+def _schedule_background(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def _tribute_event_key(data: dict) -> str:
+    payload = data.get("payload") or {}
+    unique_part = (
+        payload.get("uuid")
+        or payload.get("chargeUuid")
+        or payload.get("transactionId")
+        or payload.get("paymentToken")
+        or payload.get("subscription_id")
+        or payload.get("period_id")
+        or payload.get("trb_user_id")
+        or "unknown"
+    )
+    return f"{data.get('name') or 'unknown'}:{unique_part}:{data.get('created_at') or ''}"
 
 
 def validate_telegram_init_data(init_data: str) -> dict | None:
@@ -174,6 +197,7 @@ async def forward_tribute_webhook(body: bytes, signature: str) -> None:
         return
 
     headers = {"Content-Type": "application/json"}
+    headers["x-asmr-bot-forwarded"] = "1"
     if signature:
         headers["trbt-signature"] = signature
 
@@ -193,8 +217,8 @@ async def forward_tribute_webhook(body: bytes, signature: str) -> None:
 
 
 async def relay_privateleaks_tribute_grant(
-    body: bytes,
     *,
+    event_key: str,
     telegram_id: int,
     username: str = "",
     days: int = 31,
@@ -204,7 +228,8 @@ async def relay_privateleaks_tribute_grant(
         logger.warning("PrivateLeaks Tribute relay skipped: peer grant is not configured")
         return False
 
-    order_uuid = f"tribute-privateleaks:{hashlib.sha256(body).hexdigest()[:24]}"
+    event_hash = hashlib.sha256(event_key.encode()).hexdigest()[:24]
+    order_uuid = f"tribute-privateleaks:{event_hash}"
     payload = {
         "source_project": PROJECT_KEY,
         "order_uuid": order_uuid,
@@ -276,7 +301,21 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         if not telegram_id:
             return web.json_response({"status": "ok"})
 
+        event_key = _tribute_event_key(data)
+        order_uuid = payload.get("uuid") or None
+
         async with async_session() as session:
+            claimed = await claim_tribute_webhook_event(
+                session,
+                event_key=event_key,
+                name=event,
+                order_uuid=order_uuid,
+                payload=payload,
+            )
+            if not claimed:
+                logger.info("Duplicate Tribute event ignored: %s", event_key)
+                return web.json_response({"status": "ok", "duplicate": True})
+
             result = await session.execute(select(User).where(User.telegram_id == telegram_id))
             user = result.scalar_one_or_none()
 
@@ -295,7 +334,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             if abs(amount_eur - 3.0) < 0.001:
                 username = payload.get("telegram_username", "")
                 relayed = await relay_privateleaks_tribute_grant(
-                    body,
+                    event_key=event_key,
                     telegram_id=telegram_id,
                     username=username,
                     days=TRIBUTE_DAYS,
@@ -314,9 +353,14 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     telegram_id,
                     relayed,
                 )
-                return web.json_response({"status": "ok", "routed": "privateleaks", "relayed": relayed})
-
-            await forward_tribute_webhook(body, signature)
+                if relayed:
+                    await session.commit()
+                    return web.json_response({"status": "ok", "routed": "privateleaks", "relayed": True})
+                await session.rollback()
+                return web.json_response(
+                    {"status": "retry", "routed": "privateleaks", "relayed": False},
+                    status=503,
+                )
 
             # ELITE никогда не выдаётся автоматом — только админом вручную.
             # Tribute может проставить только PLUS или PRO.
@@ -334,7 +378,8 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             # Никогда не понижаем admin-выданный тир (ELITE → PLUS/PRO) и не сбрасываем PRO.
             TIER_RANK = {'plus': 1, 'pro': 2, 'elite': 3}
 
-            tribute_order_uuid = f"tribute:{hashlib.sha256(body).hexdigest()[:24]}"
+            event_hash = hashlib.sha256(event_key.encode()).hexdigest()[:24]
+            tribute_order_uuid = f"tribute:{event_hash}"
             TRIBUTE_DAYS, promo_code = await consume_active_promo_days(
                 session,
                 telegram_id=telegram_id,
@@ -370,6 +415,8 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             await session.commit()
             total = user.units
             lang = user.lang or "en"
+
+        _schedule_background(forward_tribute_webhook(body, signature))
 
         # Уведомление админу о Tribute оплате
         username = payload.get("telegram_username", "")

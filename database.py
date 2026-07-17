@@ -1,6 +1,8 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import BigInteger, Integer, String, DateTime, Boolean, Text, text, func, UniqueConstraint
+from sqlalchemy import BigInteger, Integer, String, DateTime, Boolean, Text, JSON, text, func, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import IntegrityError
 from datetime import datetime
 import os
 import re
@@ -74,6 +76,20 @@ class ExternalGrant(Base):
     days:           Mapped[int]      = mapped_column(Integer, default=31)
     tier:           Mapped[str]      = mapped_column(String(16), default="elite")
     created_at:     Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class TributeWebhookEvent(Base):
+    __tablename__ = "tribute_webhook_events"
+
+    id:          Mapped[int]       = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_key:   Mapped[str]       = mapped_column(Text, unique=True, nullable=False)
+    name:        Mapped[str]       = mapped_column(String(64), nullable=False)
+    order_uuid:  Mapped[str|None]  = mapped_column(Text, nullable=True)
+    payload:     Mapped[dict|None] = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=True,
+    )
+    received_at: Mapped[datetime]  = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class PromoCode(Base):
@@ -314,6 +330,8 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_pending_invites_user ON pending_invites (telegram_id)",
             "CREATE TABLE IF NOT EXISTS external_grants (id SERIAL PRIMARY KEY, source_project VARCHAR(32), order_uuid VARCHAR(96), telegram_id BIGINT, days INTEGER DEFAULT 31, tier VARCHAR(16) DEFAULT 'elite', created_at TIMESTAMP DEFAULT NOW(), CONSTRAINT uq_external_grant_source_order UNIQUE (source_project, order_uuid))",
             "CREATE INDEX IF NOT EXISTS idx_external_grants_user ON external_grants (telegram_id)",
+            "CREATE TABLE IF NOT EXISTS tribute_webhook_events (id SERIAL PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, name VARCHAR(64) NOT NULL, order_uuid TEXT, payload JSONB, received_at TIMESTAMPTZ DEFAULT NOW())",
+            "CREATE INDEX IF NOT EXISTS idx_tribute_events_order ON tribute_webhook_events (order_uuid)",
             "CREATE TABLE IF NOT EXISTS promo_codes (id SERIAL PRIMARY KEY, code VARCHAR(64) UNIQUE, days INTEGER DEFAULT 31, is_active BOOLEAN DEFAULT TRUE, uses_count INTEGER DEFAULT 0, created_by BIGINT, created_at TIMESTAMP DEFAULT NOW())",
             "CREATE INDEX IF NOT EXISTS idx_promo_codes_code ON promo_codes (code)",
             "ALTER TABLE promo_codes ADD COLUMN IF NOT EXISTS max_uses INTEGER",
@@ -649,6 +667,29 @@ async def consume_active_promo_days(
         order_uuid=order_uuid,
     )
     return days, activation.code
+
+
+async def claim_tribute_webhook_event(
+    session: AsyncSession,
+    *,
+    event_key: str,
+    name: str,
+    order_uuid: str | None,
+    payload: dict,
+) -> bool:
+    """Reserve a Tribute event in the current transaction exactly once."""
+    session.add(TributeWebhookEvent(
+        event_key=event_key,
+        name=(name or "unknown")[:64],
+        order_uuid=(order_uuid or None),
+        payload=payload,
+    ))
+    try:
+        await session.flush()
+    except IntegrityError:
+        await session.rollback()
+        return False
+    return True
 
 
 # ─── Artist functions ─────────────────────────────────────────────────────────

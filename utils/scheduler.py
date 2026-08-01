@@ -52,7 +52,9 @@ async def daily_unit_check(bot: Bot):
         GRACE_LIMIT = -7
 
         for user in users:
-            is_tribute = (user.last_payment_method or '') == 'tribute'
+            payment_method = (user.last_payment_method or '').lower()
+            is_tribute = payment_method == 'tribute'
+            is_bundle_sync = payment_method.startswith('bundle_')
             user.units -= 1
 
             # ── Non-tribute (Stars / Crypto / Trial): kick immediately at 0
@@ -135,7 +137,7 @@ async def daily_unit_check(bot: Bot):
                 except Exception:
                     pass
 
-            elif user.units == 3:
+            elif user.units == 3 and not is_bundle_sync:
                 # Напоминание за 3 дня
                 try:
                     lang = user.lang or "en"

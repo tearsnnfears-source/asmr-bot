@@ -12,11 +12,11 @@ from aiogram import Router, F, Bot
 from aiogram.types import PreCheckoutQuery, Message
 from aiogram.types.message import ContentType
 from sqlalchemy.ext.asyncio import AsyncSession
-from database import get_or_create_user, PendingPayment, create_pending_invite, assign_tier_badge, consume_active_promo_days
+from database import get_or_create_user, PendingPayment, create_pending_invite, assign_tier_badge, consume_active_promo_days, complete_bundle_checkout, apply_external_grant, ExternalGrant
 from keyboards.inline import kb_payment, kb_plans, kb_after_payment, kb_back_to_cabinet
 from locales.texts import t
 from config import STARS_PRICES, STARS_TIER_PRICES, INVITE_LINK, GROUP_ID
-from utils.sync import send_peer_elite_grant
+from utils.bundles import activate_bundle_access, send_bundle_access_message
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -26,6 +26,8 @@ PAYMENT_IMAGE = "AgACAgIAAxkBAAIBQGm7cq7ZO6fKjw7XrFrMiyI4X3h3AALXEWsbpuDhSd4hIjY
 MINIAPP_STARS_PLANS = {
     "plus": {"days": 31, "stars": STARS_TIER_PRICES["plus"]},
     "pro": {"days": 31, "stars": STARS_TIER_PRICES["pro"]},
+    "elite": {"days": 31, "stars": STARS_TIER_PRICES["elite"]},
+    "king": {"days": 31, "stars": STARS_TIER_PRICES["king"]},
 }
 LEGACY_STARS_DAY_PRICES = {
     **STARS_PRICES,
@@ -33,15 +35,27 @@ LEGACY_STARS_DAY_PRICES = {
 }
 
 
-def _resolve_stars_payload(payload: str) -> tuple[int, str, int] | None:
-    """Return (days, tier, expected_amount) for known Stars payloads."""
+def _resolve_stars_payload(payload: str) -> tuple[int, str, int, str | None] | None:
+    """Return (days, tier, expected_amount, bundle_target) for known payloads."""
     days = None
     tier = "plus"
     expected_amount = None
+    bundle_target = None
 
     if payload.startswith("stars_"):
         parts = payload.split("_")
-        if len(parts) >= 4 and parts[1] == "tier":
+        if len(parts) >= 5 and parts[1] == "bundle":
+            tier = parts[2].lower()
+            bundle_target = parts[3].lower()
+            plan = MINIAPP_STARS_PLANS.get(tier)
+            if tier == "elite" and bundle_target not in {"privateleaks", "asianleaks", "extraleaks"}:
+                return None
+            if tier == "king":
+                bundle_target = "all"
+            if plan and tier in {"elite", "king"}:
+                days = plan["days"]
+                expected_amount = plan["stars"]
+        elif len(parts) >= 4 and parts[1] == "tier":
             tier = parts[2].lower()
             plan = MINIAPP_STARS_PLANS.get(tier)
             if plan:
@@ -58,7 +72,7 @@ def _resolve_stars_payload(payload: str) -> tuple[int, str, int] | None:
 
     if not days or not expected_amount:
         return None
-    return days, tier, expected_amount
+    return days, tier, expected_amount, bundle_target
 
 async def _notify_admins(bot: Bot, text: str):
     from config import ADMIN_IDS
@@ -149,7 +163,7 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery, bot: 
         )
         logger.warning("Rejected Stars pre-checkout with unknown payload: %s", pre_checkout_query.invoice_payload)
         return
-    _, _, expected_amount = resolved
+    _, _, expected_amount, _ = resolved
     if pre_checkout_query.total_amount != expected_amount:
         await bot.answer_pre_checkout_query(
             pre_checkout_query.id,
@@ -183,7 +197,7 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
         if not resolved:
             logger.warning(f"Unknown Stars payload format: {payload}")
             return
-        days, tier, expected_amount = resolved
+        days, tier, expected_amount, bundle_target = resolved
         paid_amount = message.successful_payment.total_amount
         if paid_amount != expected_amount:
             logger.warning(
@@ -194,39 +208,113 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
 
         user = await get_or_create_user(session, user_id)
         charge_id = message.successful_payment.telegram_payment_charge_id or payload
+        is_bundle = tier in {"elite", "king"}
+        bundle_order_uuid = f"stars:{charge_id}"
+        if is_bundle:
+            duplicate = await session.execute(
+                select(ExternalGrant.id).where(
+                    ExternalGrant.source_project == "asmr_stars",
+                    ExternalGrant.order_uuid == bundle_order_uuid,
+                )
+            )
+            if duplicate.scalar_one_or_none() is not None:
+                logger.info("Duplicate Stars bundle charge ignored: %s", charge_id)
+                return
+
         days, promo_code = await consume_active_promo_days(
             session,
             telegram_id=user_id,
             default_days=days,
             payment_method="stars",
-            order_uuid=f"stars:{charge_id}",
+            order_uuid=bundle_order_uuid,
         )
 
-        # Начисляем подписку (Stars — без grace debt, стартуем от 0 если был в минусе)
+        local_tier = "pro" if is_bundle else tier
+        if is_bundle:
+            applied, user = await apply_external_grant(
+                session,
+                source_project="asmr_stars",
+                order_uuid=bundle_order_uuid,
+                telegram_id=user_id,
+                days=days,
+                tier=local_tier,
+                username=user.username,
+                full_name=user.full_name,
+                payment_method="stars",
+            )
+            if not applied:
+                logger.info("Duplicate Stars bundle charge ignored: %s", charge_id)
+                return
+        else:
+            # Stars do not carry grace debt: a negative balance restarts at zero.
+            base = max(0, user.units)
+            user.units = base + days
+            user.is_active = True
+            user.last_payment_method = "stars"
+            tier_rank = {"free": 0, "plus": 1, "pro": 2, "elite": 3}
+            current_tier = (user.tier or "plus").lower()
+            if tier_rank.get(local_tier, 0) > tier_rank.get(current_tier, 0):
+                user.tier = local_tier
+            assign_tier_badge(user)
+            await session.commit()
+
         lang = user.lang or "en"
-        base = max(0, user.units)  # Stars не наследуют grace debt
-        user.units = base + days
-        user.is_active = True
-        user.last_payment_method = "stars"
-        user.tier = tier
-        assign_tier_badge(user)
-        await session.commit()
 
         logger.info(f"Stars credited: user {user_id} +{days} days → total {user.units}")
 
-        # Уведомление админу
-        if tier == "elite":
-            await send_peer_elite_grant(
-                telegram_id=user_id,
-                order_uuid=f"stars:{message.successful_payment.telegram_payment_charge_id or payload}",
-                username=user.username,
-                full_name=user.full_name,
-                days=days,
-                tier=tier,
-            )
-
         nick = f"@{user.username}" if user.username else f"id{user_id}"
         promo_line = f"\n🎟 Промокод: <code>{promo_code}</code>" if promo_code else ""
+
+        if is_bundle:
+            try:
+                access_links, failures = await activate_bundle_access(
+                    bot,
+                    telegram_id=user_id,
+                    order_uuid=bundle_order_uuid,
+                    username=user.username,
+                    full_name=user.full_name,
+                    days=days,
+                    local_days_left=user.units,
+                    tier=tier,
+                    target_project=bundle_target,
+                )
+                await complete_bundle_checkout(
+                    session,
+                    telegram_id=user_id,
+                    tier=tier,
+                    target_project=bundle_target,
+                    payment_method="stars",
+                    order_uuid=bundle_order_uuid,
+                    access_links=access_links,
+                    partial=bool(failures),
+                )
+                failed_projects = ", ".join(item.get("project", "unknown") for item in failures)
+                failure_line = f"\n⚠️ Не выданы ссылки: <code>{failed_projects}</code>" if failures else ""
+                await _notify_admins(bot,
+                    f"⭐ <b>Новая {tier.upper()} оплата — TG Stars</b>\n"
+                    f"👤 {nick} | <code>{user_id}</code>\n"
+                    f"📅 +{days} дней | Итого ASMR: {user.units} дн. | tier=PRO\n"
+                    f"🔗 Ссылок: {len(access_links)}"
+                    f"{promo_line}{failure_line}"
+                )
+                await send_bundle_access_message(
+                    bot,
+                    telegram_id=user_id,
+                    tier=tier,
+                    days=days,
+                    local_days_left=user.units,
+                    links=access_links,
+                    lang=lang,
+                )
+            except Exception as exc:
+                logger.error("Bundle Stars activation failed for user %s: %s", user_id, exc, exc_info=True)
+                await _notify_admins(bot,
+                    f"⚠️ <b>{tier.upper()} Stars bundle activation failed</b>\n"
+                    f"User: <code>{user_id}</code>\nOrder: <code>{bundle_order_uuid}</code>"
+                )
+            return
+
+        # Уведомление админу
         await _notify_admins(bot,
             f"⭐ <b>Новая оплата — TG Stars</b>\n"
             f"👤 {nick} | <code>{user_id}</code>\n"

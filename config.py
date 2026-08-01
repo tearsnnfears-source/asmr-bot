@@ -23,6 +23,7 @@ TRIBUTE_SITE_WEBHOOK_URL = os.getenv(
 TRIBUTE_PLUS_URL    = os.getenv("TRIBUTE_PLUS_URL",  "https://t.me/tribute/app?startapp=sQSn")
 TRIBUTE_PRO_URL     = os.getenv("TRIBUTE_PRO_URL",   "https://t.me/tribute/app?startapp=sT5D")
 TRIBUTE_ELITE_URL   = os.getenv("TRIBUTE_ELITE_URL", "https://t.me/tribute/app?startapp=sT5E")
+TRIBUTE_KING_URL    = os.getenv("TRIBUTE_KING_URL",  "https://t.me/tribute/app?startapp=s10Vq")
 TRIBUTE_ELITE_MIN_EUR = float(os.getenv("TRIBUTE_ELITE_MIN_EUR", "9") or "9")
 
 # startapp code → tier (used in webhook to auto-assign tier)
@@ -30,6 +31,7 @@ TRIBUTE_TIER_MAP = {
     "sQSn": "plus",
     "sT5D": "pro",
     "sT5E": "elite",
+    "s10Vq": "king",
 }
 
 # Telegram Stars — prices in stars
@@ -42,6 +44,7 @@ STARS_TIER_PRICES = {
     'plus':  500,
     'pro':   650,
     'elite': 800,
+    'king':  1050,
     'free':  500,
 }
 
@@ -68,3 +71,25 @@ PEER_GRANT_URL = os.getenv("PEER_GRANT_URL", "")
 PEER_GRANT_SECRET = os.getenv("PEER_GRANT_SECRET", "")
 PEER_PROJECT_KEY = os.getenv("PEER_PROJECT_KEY", "privateleaks")
 ELITE_SYNC_DAYS = int(os.getenv("ELITE_SYNC_DAYS", "31") or "31")
+
+# Multi-project bundles sold by the ASMR bot. PrivateLeaks reuses the old
+# one-peer variables so the existing ELITE bridge keeps working while Asian
+# and Extra are configured independently.
+BUNDLE_PEERS = {
+    "privateleaks": {
+        "label": "PrivateLeaks",
+        "grant_url": os.getenv("PRIVATELEAKS_GRANT_URL", PEER_GRANT_URL),
+        "grant_secret": os.getenv("PRIVATELEAKS_GRANT_SECRET", PEER_GRANT_SECRET),
+    },
+    "asianleaks": {
+        "label": "AsianLeaks",
+        "grant_url": os.getenv("ASIANLEAKS_GRANT_URL", ""),
+        "grant_secret": os.getenv("ASIANLEAKS_GRANT_SECRET", ""),
+    },
+    "extraleaks": {
+        "label": "ExtraLeaks",
+        "grant_url": os.getenv("EXTRALEAKS_GRANT_URL", ""),
+        "grant_secret": os.getenv("EXTRALEAKS_GRANT_SECRET", ""),
+    },
+}
+BUNDLE_TARGETS = tuple(BUNDLE_PEERS)

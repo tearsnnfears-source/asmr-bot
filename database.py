@@ -3,7 +3,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import BigInteger, Integer, String, DateTime, Boolean, Text, JSON, text, func, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import re
 import logging
@@ -76,6 +76,28 @@ class ExternalGrant(Base):
     days:           Mapped[int]      = mapped_column(Integer, default=31)
     tier:           Mapped[str]      = mapped_column(String(16), default="elite")
     created_at:     Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class BundleCheckout(Base):
+    __tablename__ = "bundle_checkouts"
+    __table_args__ = (
+        UniqueConstraint("order_uuid", name="uq_bundle_checkout_order_uuid"),
+    )
+
+    id:             Mapped[int]        = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telegram_id:    Mapped[int]        = mapped_column(BigInteger, index=True)
+    tier:           Mapped[str]        = mapped_column(String(16))
+    target_project: Mapped[str|None]   = mapped_column(String(32), nullable=True)
+    status:         Mapped[str]        = mapped_column(String(16), default="pending")
+    payment_method: Mapped[str|None]   = mapped_column(String(32), nullable=True)
+    order_uuid:     Mapped[str|None]   = mapped_column(String(128), nullable=True)
+    access_links:   Mapped[list|None]  = mapped_column(
+        JSON().with_variant(JSONB, "postgresql"),
+        nullable=True,
+    )
+    consumed:       Mapped[bool]       = mapped_column(Boolean, default=False)
+    created_at:     Mapped[datetime]   = mapped_column(DateTime, default=datetime.utcnow)
+    completed_at:   Mapped[datetime|None] = mapped_column(DateTime, nullable=True)
 
 
 class TributeWebhookEvent(Base):
@@ -330,6 +352,8 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_pending_invites_user ON pending_invites (telegram_id)",
             "CREATE TABLE IF NOT EXISTS external_grants (id SERIAL PRIMARY KEY, source_project VARCHAR(32), order_uuid VARCHAR(96), telegram_id BIGINT, days INTEGER DEFAULT 31, tier VARCHAR(16) DEFAULT 'elite', created_at TIMESTAMP DEFAULT NOW(), CONSTRAINT uq_external_grant_source_order UNIQUE (source_project, order_uuid))",
             "CREATE INDEX IF NOT EXISTS idx_external_grants_user ON external_grants (telegram_id)",
+            "CREATE TABLE IF NOT EXISTS bundle_checkouts (id SERIAL PRIMARY KEY, telegram_id BIGINT NOT NULL, tier VARCHAR(16) NOT NULL, target_project VARCHAR(32), status VARCHAR(16) DEFAULT 'pending', payment_method VARCHAR(32), order_uuid VARCHAR(128), access_links JSONB, consumed BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW(), completed_at TIMESTAMP, CONSTRAINT uq_bundle_checkout_order_uuid UNIQUE (order_uuid))",
+            "CREATE INDEX IF NOT EXISTS idx_bundle_checkouts_user ON bundle_checkouts (telegram_id, created_at DESC)",
             "CREATE TABLE IF NOT EXISTS tribute_webhook_events (id SERIAL PRIMARY KEY, event_key TEXT UNIQUE NOT NULL, name VARCHAR(64) NOT NULL, order_uuid TEXT, payload JSONB, received_at TIMESTAMPTZ DEFAULT NOW())",
             "CREATE INDEX IF NOT EXISTS idx_tribute_events_order ON tribute_webhook_events (order_uuid)",
             "CREATE TABLE IF NOT EXISTS promo_codes (id SERIAL PRIMARY KEY, code VARCHAR(64) UNIQUE, days INTEGER DEFAULT 31, is_active BOOLEAN DEFAULT TRUE, uses_count INTEGER DEFAULT 0, created_by BIGINT, created_at TIMESTAMP DEFAULT NOW())",
@@ -996,7 +1020,10 @@ async def apply_external_grant(
     user.units = base + safe_days
     user.is_active = True
     user.last_payment_method = payment_method
-    user.tier = safe_tier
+    tier_rank = {"free": 0, "plus": 1, "pro": 2, "elite": 3}
+    current_tier = (user.tier or "plus").lower()
+    if tier_rank.get(safe_tier, 0) > tier_rank.get(current_tier, 0):
+        user.tier = safe_tier
     assign_tier_badge(user)
 
     session.add(ExternalGrant(
@@ -1006,9 +1033,195 @@ async def apply_external_grant(
         days=safe_days,
         tier=safe_tier,
     ))
+    try:
+        await session.commit()
+        await session.refresh(user)
+        return True, user
+    except IntegrityError:
+        await session.rollback()
+        duplicate_result = await session.execute(
+            select(ExternalGrant.id).where(
+                ExternalGrant.source_project == source_project,
+                ExternalGrant.order_uuid == order_uuid,
+            )
+        )
+        if duplicate_result.scalar_one_or_none() is None:
+            raise
+        user = await get_or_create_user(session, telegram_id, username=username, full_name=full_name)
+        return False, user
+
+
+# ─── Bundle checkout CRUD ─────────────────────────────────────────────────────
+
+BUNDLE_TIERS = {"elite", "king"}
+BUNDLE_TARGETS = {"privateleaks", "asianleaks", "extraleaks"}
+BUNDLE_COMPLETE_STATUSES = {"completed", "partial"}
+
+
+async def prepare_bundle_checkout(
+    session: AsyncSession,
+    *,
+    telegram_id: int,
+    tier: str,
+    target_project: str | None = None,
+) -> BundleCheckout:
+    safe_tier = (tier or "").lower()
+    safe_target = (target_project or "").lower() or None
+    if safe_tier not in BUNDLE_TIERS:
+        raise ValueError("Invalid bundle tier")
+    if safe_tier == "elite" and safe_target not in BUNDLE_TARGETS:
+        raise ValueError("Choose a valid ELITE second page")
+    if safe_tier == "king":
+        safe_target = "all"
+
+    checkout = BundleCheckout(
+        telegram_id=int(telegram_id),
+        tier=safe_tier,
+        target_project=safe_target,
+        status="pending",
+    )
+    session.add(checkout)
     await session.commit()
-    await session.refresh(user)
-    return True, user
+    await session.refresh(checkout)
+    return checkout
+
+
+async def get_bundle_checkout_for_tribute(
+    session: AsyncSession,
+    *,
+    telegram_id: int,
+    tier: str,
+    renewal: bool = False,
+) -> BundleCheckout | None:
+    from sqlalchemy import select
+
+    safe_tier = (tier or "").lower()
+    if safe_tier not in BUNDLE_TIERS:
+        return None
+
+    if not renewal:
+        recent_cutoff = datetime.utcnow() - timedelta(hours=72)
+        pending_result = await session.execute(
+            select(BundleCheckout)
+            .where(
+                BundleCheckout.telegram_id == int(telegram_id),
+                BundleCheckout.tier == safe_tier,
+                BundleCheckout.status == "pending",
+                BundleCheckout.created_at >= recent_cutoff,
+            )
+            .order_by(BundleCheckout.created_at.desc())
+            .limit(1)
+        )
+        pending = pending_result.scalar_one_or_none()
+        if pending:
+            return pending
+
+    completed_result = await session.execute(
+        select(BundleCheckout)
+        .where(
+            BundleCheckout.telegram_id == int(telegram_id),
+            BundleCheckout.tier == safe_tier,
+            BundleCheckout.status.in_(BUNDLE_COMPLETE_STATUSES),
+        )
+        .order_by(BundleCheckout.completed_at.desc(), BundleCheckout.created_at.desc())
+        .limit(1)
+    )
+    return completed_result.scalar_one_or_none()
+
+
+async def complete_bundle_checkout(
+    session: AsyncSession,
+    *,
+    telegram_id: int,
+    tier: str,
+    target_project: str | None,
+    payment_method: str,
+    order_uuid: str,
+    access_links: list[dict],
+    checkout_id: int | None = None,
+    partial: bool = False,
+) -> BundleCheckout:
+    from sqlalchemy import select
+
+    safe_order_uuid = (order_uuid or "").strip()[:128]
+    if not safe_order_uuid:
+        raise ValueError("order_uuid is required")
+
+    existing_result = await session.execute(
+        select(BundleCheckout).where(BundleCheckout.order_uuid == safe_order_uuid)
+    )
+    existing = existing_result.scalar_one_or_none()
+    if existing:
+        return existing
+
+    checkout = await session.get(BundleCheckout, int(checkout_id)) if checkout_id else None
+    if not checkout or checkout.status != "pending":
+        checkout = BundleCheckout(telegram_id=int(telegram_id), tier=(tier or "").lower())
+        session.add(checkout)
+
+    checkout.telegram_id = int(telegram_id)
+    checkout.tier = (tier or "").lower()
+    checkout.target_project = (target_project or "").lower() or None
+    checkout.status = "partial" if partial else "completed"
+    checkout.payment_method = (payment_method or "")[:32]
+    checkout.order_uuid = safe_order_uuid
+    checkout.access_links = list(access_links or [])
+    checkout.consumed = False
+    checkout.completed_at = datetime.utcnow()
+
+    try:
+        await session.commit()
+        await session.refresh(checkout)
+        return checkout
+    except IntegrityError:
+        await session.rollback()
+        result = await session.execute(
+            select(BundleCheckout).where(BundleCheckout.order_uuid == safe_order_uuid)
+        )
+        duplicate = result.scalar_one_or_none()
+        if duplicate:
+            return duplicate
+        raise
+
+
+async def get_latest_bundle_access(
+    session: AsyncSession,
+    telegram_id: int,
+    *,
+    consume: bool = False,
+) -> BundleCheckout | None:
+    from sqlalchemy import select
+
+    conditions = [
+        BundleCheckout.telegram_id == int(telegram_id),
+        BundleCheckout.status.in_(BUNDLE_COMPLETE_STATUSES),
+    ]
+    result = await session.execute(
+        select(BundleCheckout)
+        .where(*conditions)
+        .order_by(BundleCheckout.completed_at.desc(), BundleCheckout.created_at.desc())
+        .limit(1)
+    )
+    checkout = result.scalar_one_or_none()
+    if checkout and consume and checkout.consumed:
+        return None
+    if checkout and consume:
+        checkout.consumed = True
+        await session.commit()
+    return checkout
+
+
+def bundle_access_payload(checkout: BundleCheckout | None) -> dict:
+    if not checkout:
+        return {"access_links": []}
+    created_at = checkout.completed_at or checkout.created_at
+    return {
+        "tier": checkout.tier,
+        "target_project": checkout.target_project or "",
+        "access_links": list(checkout.access_links or []),
+        "created_at": created_at.isoformat() if created_at else "",
+        "status": checkout.status,
+    }
 
 
 # ─── PendingInvite CRUD ───────────────────────────────────────────────────────

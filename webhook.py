@@ -11,8 +11,9 @@ from aiogram import Bot
 from aiogram.types import LabeledPrice
 from sqlalchemy import select, text as sa_text, func as sa_func, or_ as sa_or
 
-from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, activate_promo_code, get_active_promo_activation, consume_active_promo_days, claim_tribute_webhook_event, normalize_promo_code, _auto_thumbnail
-from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, PROJECT_KEY, PEER_GRANT_URL, PEER_GRANT_SECRET
+from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, BundleCheckout, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, activate_promo_code, get_active_promo_activation, consume_active_promo_days, claim_tribute_webhook_event, normalize_promo_code, apply_external_grant, prepare_bundle_checkout, get_bundle_checkout_for_tribute, complete_bundle_checkout, get_latest_bundle_access, bundle_access_payload, _auto_thumbnail
+from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, TRIBUTE_ELITE_URL, TRIBUTE_KING_URL, PROJECT_KEY, PEER_GRANT_URL, PEER_GRANT_SECRET, INTERNAL_GRANT_SECRET
+from utils.bundles import activate_bundle_access, bundle_projects_for_tier, get_peer_access_status, refresh_peer_invite, send_bundle_access_message
 
 logger = logging.getLogger(__name__)
 _background_tasks: set[asyncio.Task] = set()
@@ -21,6 +22,8 @@ INIT_DATA_MAX_AGE_SECONDS = 24 * 60 * 60
 MINIAPP_STARS_PLANS = {
     "plus": {"days": 31, "stars": STARS_TIER_PRICES["plus"]},
     "pro": {"days": 31, "stars": STARS_TIER_PRICES["pro"]},
+    "elite": {"days": 31, "stars": STARS_TIER_PRICES["elite"]},
+    "king": {"days": 31, "stars": STARS_TIER_PRICES["king"]},
 }
 
 
@@ -190,6 +193,176 @@ async def _create_group_invite_for_user(telegram_id: int, store_pending: bool = 
     finally:
         await bot.session.close()
     return invite_link
+
+
+def _internal_grant_authorized(request: web.Request) -> bool:
+    if not INTERNAL_GRANT_SECRET:
+        return False
+    auth = request.headers.get("Authorization", "")
+    bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    header_secret = request.headers.get("X-Internal-Grant-Secret", "").strip()
+    return (
+        bool(bearer and hmac.compare_digest(bearer, INTERNAL_GRANT_SECRET))
+        or bool(header_secret and hmac.compare_digest(header_secret, INTERNAL_GRANT_SECRET))
+    )
+
+
+async def internal_grant_access(request: web.Request) -> web.Response:
+    """Receive additive access from another project; bundle tiers map to ASMR PRO."""
+    if not INTERNAL_GRANT_SECRET:
+        return web.json_response({"error": "Internal grants are not configured"}, status=503)
+    if not _internal_grant_authorized(request):
+        return web.json_response({"error": "Forbidden"}, status=403)
+
+    try:
+        data = await request.json()
+        telegram_id = int(data.get("telegram_id", 0))
+        days = int(data.get("days") or 31)
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    source_project = str(data.get("source_project") or "external").strip()
+    order_uuid = str(data.get("order_uuid") or "").strip()
+    incoming_tier = str(data.get("tier") or "elite").lower()
+    username = (data.get("username") or "").strip() or None
+    full_name = (data.get("full_name") or "").strip() or None
+    silent = data.get("silent") is True
+    payment_method = str(data.get("payment_method") or f"bundle_{incoming_tier}_sync").strip()[:32]
+
+    if not telegram_id or not order_uuid:
+        return web.json_response({"error": "telegram_id and order_uuid are required"}, status=400)
+    if incoming_tier not in {"plus", "pro", "elite", "king"}:
+        return web.json_response({"error": "Unsupported cross-grant tier"}, status=400)
+
+    local_tier = "pro" if incoming_tier in {"elite", "king"} else incoming_tier
+    async with async_session() as session:
+        applied, user = await apply_external_grant(
+            session,
+            source_project=source_project,
+            order_uuid=order_uuid,
+            telegram_id=telegram_id,
+            days=days,
+            tier=local_tier,
+            username=username,
+            full_name=full_name,
+            payment_method=payment_method,
+        )
+        total = user.units or 0
+        lang = user.lang or "en"
+
+    has_active_access = total > 0
+    if applied or (silent and has_active_access):
+        invite_link = await _create_group_invite_for_user(telegram_id, store_pending=not silent)
+    elif has_active_access:
+        async with async_session() as session:
+            invite_link = await get_latest_invite(session, telegram_id)
+        invite_link = invite_link or INVITE_LINK
+    else:
+        invite_link = ""
+
+    if applied:
+        nick = f"@{username}" if username else f"id{telegram_id}"
+        await _notify_admins(
+            f"<b>{incoming_tier.upper()} grant received for ASMR</b>\n"
+            f"Source: <code>{source_project}</code>\n"
+            f"Order: <code>{order_uuid}</code>\n"
+            f"User: {nick} | <code>{telegram_id}</code>\n"
+            f"ASMR tier: <b>PRO</b> | +{days} days | Total: {total} days"
+        )
+
+        if not silent and invite_link:
+            bot = Bot(token=BOT_TOKEN)
+            try:
+                from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+                text = (
+                    f"<b>{incoming_tier.upper()} access activated for ASMR.LEAKS.</b>\n\n"
+                    f"ASMR tier: <b>PRO</b>\n"
+                    f"Added: <b>{days} days</b>\n"
+                    f"Total: <b>{total} days</b>"
+                )
+                if lang == "ru":
+                    text = (
+                        f"<b>{incoming_tier.upper()} доступ ASMR.LEAKS активирован.</b>\n\n"
+                        f"Тариф ASMR: <b>PRO</b>\n"
+                        f"Добавлено: <b>{days} дней</b>\n"
+                        f"Итого: <b>{total} дней</b>"
+                    )
+                keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Join ASMR.LEAKS", url=invite_link)
+                ]])
+                await bot.send_message(telegram_id, text, parse_mode="HTML", reply_markup=keyboard)
+            except Exception as exc:
+                logger.info("Cannot DM synced ASMR user %s: %s", telegram_id, exc)
+            finally:
+                await bot.session.close()
+
+    return web.json_response({
+        "ok": True,
+        "applied": applied,
+        "telegram_id": telegram_id,
+        "tier": local_tier,
+        "days_left": total,
+        "invite_link": invite_link,
+    })
+
+
+async def internal_access_status(request: web.Request) -> web.Response:
+    """Return current local access without issuing or extending anything."""
+    if not INTERNAL_GRANT_SECRET:
+        return web.json_response({"error": "Internal grants are not configured"}, status=503)
+    if not _internal_grant_authorized(request):
+        return web.json_response({"error": "Forbidden"}, status=403)
+    try:
+        data = await request.json()
+        telegram_id = int(data.get("telegram_id", 0))
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    if not telegram_id:
+        return web.json_response({"error": "telegram_id is required"}, status=400)
+
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+        user = result.scalar_one_or_none()
+    days_left = max(0, (user.units or 0) if user else 0)
+    return web.json_response({
+        "ok": True,
+        "active": days_left > 0,
+        "days_left": days_left,
+        "tier": (user.tier or "plus") if user else "plus",
+    })
+
+
+async def internal_refresh_invite(request: web.Request) -> web.Response:
+    """Issue a fresh one-time invite only while the local balance is positive."""
+    if not INTERNAL_GRANT_SECRET:
+        return web.json_response({"error": "Internal grants are not configured"}, status=503)
+    if not _internal_grant_authorized(request):
+        return web.json_response({"error": "Forbidden"}, status=403)
+    try:
+        data = await request.json()
+        telegram_id = int(data.get("telegram_id", 0))
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+    if not telegram_id:
+        return web.json_response({"error": "telegram_id is required"}, status=400)
+
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+        user = result.scalar_one_or_none()
+    days_left = max(0, (user.units or 0) if user else 0)
+    if days_left <= 0:
+        return web.json_response({"error": "No active access", "active": False, "days_left": 0}, status=403)
+
+    invite_link = await _create_group_invite_for_user(telegram_id, store_pending=False)
+    if not invite_link:
+        return web.json_response({"error": "Invite is unavailable"}, status=503)
+    return web.json_response({
+        "ok": True,
+        "active": True,
+        "days_left": days_left,
+        "tier": user.tier or "plus",
+        "invite_link": invite_link,
+    })
 
 
 async def forward_tribute_webhook(body: bytes, signature: str) -> None:
@@ -362,17 +535,44 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     status=503,
                 )
 
-            # ELITE никогда не выдаётся автоматом — только админом вручную.
-            # Tribute может проставить только PLUS или PRO.
-            if amount_eur >= 7.0:
-                new_tier = 'pro'
+            if abs(amount_eur - 13.0) < 0.001:
+                purchased_tier = "king"
+            elif abs(amount_eur - 10.0) < 0.001:
+                purchased_tier = "elite"
+            elif amount_eur >= 7.0:
+                purchased_tier = "pro"
             else:
-                new_tier = 'plus'
+                purchased_tier = "plus"
+
+            is_bundle = purchased_tier in {"elite", "king"}
+            bundle_checkout = None
+            bundle_target = None
+            if is_bundle:
+                bundle_checkout = await get_bundle_checkout_for_tribute(
+                    session,
+                    telegram_id=telegram_id,
+                    tier=purchased_tier,
+                    renewal=event == "renewed_subscription",
+                )
+                bundle_target = "all" if purchased_tier == "king" else (
+                    bundle_checkout.target_project if bundle_checkout else None
+                )
+                if purchased_tier == "elite" and not bundle_target:
+                    logger.warning("ELITE Tribute payment has no saved target: telegram_id=%s", telegram_id)
+                    await session.rollback()
+                    return web.json_response(
+                        {"status": "retry", "error": "ELITE target is not prepared"},
+                        status=409,
+                    )
+
+            # Bundle purchases unlock the ASMR app at PRO level. The bundle
+            # name is stored in bundle_checkouts, not in users.tier.
+            local_tier = "pro" if is_bundle else purchased_tier
 
             logger.info(
-                "Tribute payment: raw_amount=%s -> amount_eur=%.2f -> new_tier=%s (telegram_id=%s)",
+                "Tribute payment: raw_amount=%s -> amount_eur=%.2f -> purchased_tier=%s local_tier=%s target=%s (telegram_id=%s)",
                 payload.get("amount") or payload.get("price"),
-                amount_eur, new_tier, telegram_id,
+                amount_eur, purchased_tier, local_tier, bundle_target, telegram_id,
             )
 
             # Никогда не понижаем admin-выданный тир (ELITE → PLUS/PRO) и не сбрасываем PRO.
@@ -394,7 +594,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     units=TRIBUTE_DAYS,
                     is_active=True,
                     last_payment_method="tribute",
-                    tier=new_tier,
+                    tier=local_tier,
                 )
                 session.add(user)
             else:
@@ -406,17 +606,86 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                 user.last_payment_method = "tribute"
                 # Tier: только апгрейд. ELITE/PRO нельзя автоматически понизить через Tribute.
                 current_rank = TIER_RANK.get((user.tier or 'plus').lower(), 1)
-                new_rank     = TIER_RANK.get(new_tier, 1)
+                new_rank     = TIER_RANK.get(local_tier, 1)
                 if new_rank > current_rank:
-                    user.tier = new_tier
+                    user.tier = local_tier
                 # else: оставляем существующий тир как есть.
             assign_tier_badge(user)
 
             await session.commit()
             total = user.units
             lang = user.lang or "en"
+            bundle_checkout_id = (
+                bundle_checkout.id
+                if bundle_checkout and bundle_checkout.status == "pending"
+                else None
+            )
 
         _schedule_background(forward_tribute_webhook(body, signature))
+
+        if is_bundle:
+            bundle_order_uuid = tribute_order_uuid
+            bundle_bot = Bot(token=BOT_TOKEN)
+            try:
+                access_links, failures = await activate_bundle_access(
+                    bundle_bot,
+                    telegram_id=telegram_id,
+                    order_uuid=bundle_order_uuid,
+                    username=user.username or payload.get("telegram_username"),
+                    full_name=user.full_name,
+                    days=TRIBUTE_DAYS,
+                    local_days_left=total,
+                    tier=purchased_tier,
+                    target_project=bundle_target,
+                )
+                async with async_session() as bundle_session:
+                    await complete_bundle_checkout(
+                        bundle_session,
+                        telegram_id=telegram_id,
+                        tier=purchased_tier,
+                        target_project=bundle_target,
+                        payment_method="tribute",
+                        order_uuid=bundle_order_uuid,
+                        access_links=access_links,
+                        checkout_id=bundle_checkout_id,
+                        partial=bool(failures),
+                    )
+
+                failed_projects = ", ".join(item.get("project", "unknown") for item in failures)
+                username = payload.get("telegram_username", "")
+                nick = f"@{username}" if username else f"id{telegram_id}"
+                promo_line = f"\n🎟 Промокод: <code>{promo_code}</code>" if promo_code else ""
+                failure_line = f"\n⚠️ Не выданы ссылки: <code>{failed_projects}</code>" if failures else ""
+                await _notify_admins(
+                    f"💳 <b>Новая {purchased_tier.upper()} оплата — Tribute</b>\n"
+                    f"👤 {nick} | <code>{telegram_id}</code>\n"
+                    f"📅 +{TRIBUTE_DAYS} | Итого ASMR: {total} дн. | tier=PRO\n"
+                    f"🔗 Ссылок: {len(access_links)}"
+                    f"{promo_line}{failure_line}"
+                )
+                await send_bundle_access_message(
+                    bundle_bot,
+                    telegram_id=telegram_id,
+                    tier=purchased_tier,
+                    days=TRIBUTE_DAYS,
+                    local_days_left=total,
+                    links=access_links,
+                    lang=lang,
+                )
+            except Exception as exc:
+                logger.error("Bundle Tribute activation failed for %s: %s", telegram_id, exc, exc_info=True)
+                await _notify_admins(
+                    f"⚠️ <b>{purchased_tier.upper()} bundle activation failed</b>\n"
+                    f"User: <code>{telegram_id}</code>\nOrder: <code>{bundle_order_uuid}</code>"
+                )
+            finally:
+                await bundle_bot.session.close()
+
+            return web.json_response({
+                "status": "ok",
+                "tier": purchased_tier,
+                "target_project": bundle_target,
+            })
 
         # Уведомление админу о Tribute оплате
         username = payload.get("telegram_username", "")
@@ -482,6 +751,191 @@ async def parse_init_data(request: web.Request) -> dict:
     except:
         return None
 
+
+async def api_prepare_bundle_checkout(request: web.Request) -> web.Response:
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    try:
+        data = await request.json()
+        tier = str(data.get("tier") or "").lower()
+        target_project = str(data.get("bundle_target") or "").lower() or None
+        async with async_session() as session:
+            checkout = await prepare_bundle_checkout(
+                session,
+                telegram_id=user_data["user_id"],
+                tier=tier,
+                target_project=target_project,
+            )
+        return web.json_response({
+            "ok": True,
+            "checkout_id": checkout.id,
+            "tier": checkout.tier,
+            "target_project": checkout.target_project,
+        })
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except Exception as exc:
+        logger.error("prepare_bundle_checkout error: %s", exc)
+        return web.json_response({"error": "Could not prepare checkout"}, status=500)
+
+
+ACCESS_PROJECT_LABELS = {
+    "asmrleaks": "ASMR.LEAKS",
+    "privateleaks": "PrivateLeaks",
+    "asianleaks": "AsianLeaks",
+    "extraleaks": "ExtraLeaks",
+}
+
+
+def _bundle_entitlement_projects(bundle) -> list[str]:
+    if not bundle:
+        return []
+    try:
+        return ["asmrleaks", *bundle_projects_for_tier(bundle.tier, bundle.target_project)]
+    except ValueError:
+        return ["asmrleaks"]
+
+
+async def api_access_links(request: web.Request) -> web.Response:
+    """Return the pages represented by the user's latest active access record."""
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    telegram_id = int(user_data["user_id"])
+
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+        user = result.scalar_one_or_none()
+        bundle = await get_latest_bundle_access(session, telegram_id, consume=False)
+        latest_local_invite = await get_latest_invite(session, telegram_id)
+
+    projects = _bundle_entitlement_projects(bundle)
+    local_days = max(0, (user.units or 0) if user else 0)
+    if not projects and local_days > 0:
+        projects = ["asmrleaks"]
+
+    peer_projects = [project for project in projects if project != "asmrleaks"]
+    peer_statuses = await asyncio.gather(*[
+        get_peer_access_status(project=project, telegram_id=telegram_id)
+        for project in peer_projects
+    ])
+    status_by_project = {
+        item.get("project"): item for item in peer_statuses if item.get("project")
+    }
+
+    stored = {
+        item.get("project"): item
+        for item in ((bundle.access_links or []) if bundle else [])
+        if isinstance(item, dict) and item.get("project")
+    }
+    links = []
+    for project in projects:
+        saved = stored.get(project) or {}
+        if project == "asmrleaks":
+            active = local_days > 0
+            status_available = True
+            days_left = local_days
+            url = (saved.get("url") or latest_local_invite or INVITE_LINK or "") if active else ""
+        else:
+            status = status_by_project.get(project) or {}
+            status_available = bool(status.get("ok"))
+            active = bool(status.get("active")) if status_available else None
+            days_left = int(status.get("days_left") or 0) if status_available else None
+            url = (saved.get("url") or "") if active else ""
+        links.append({
+            "project": project,
+            "label": ACCESS_PROJECT_LABELS.get(project, project),
+            "url": url,
+            "days_left": days_left,
+            "active": active,
+            "status_available": status_available,
+            "refreshable": True,
+        })
+
+    return web.json_response({
+        "ok": True,
+        "tier": bundle.tier if bundle else ((user.tier or "plus") if user else "free"),
+        "access_links": links,
+    })
+
+
+async def api_refresh_access_link(request: web.Request) -> web.Response:
+    """Verify a project's own balance, issue a new invite, and persist it."""
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    try:
+        data = await request.json()
+        project = str(data.get("project") or "").lower()
+    except Exception:
+        return web.json_response({"error": "Invalid request"}, status=400)
+    if project not in ACCESS_PROJECT_LABELS:
+        return web.json_response({"error": "Unknown project"}, status=400)
+
+    telegram_id = int(user_data["user_id"])
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+        user = result.scalar_one_or_none()
+        bundle = await get_latest_bundle_access(session, telegram_id, consume=False)
+
+    entitled_projects = _bundle_entitlement_projects(bundle)
+    if project == "asmrleaks":
+        days_left = max(0, (user.units or 0) if user else 0)
+        if days_left <= 0:
+            return web.json_response({"error": "No active ASMR access", "active": False}, status=403)
+        invite_link = await _create_group_invite_for_user(
+            telegram_id,
+            store_pending=bundle is None,
+        )
+        tier = user.tier or "plus"
+    else:
+        if not bundle or project not in entitled_projects:
+            return web.json_response({"error": "This page is not included in your subscription"}, status=403)
+        refreshed = await refresh_peer_invite(project=project, telegram_id=telegram_id)
+        if not refreshed.get("ok"):
+            status = 403 if refreshed.get("active") is False and refreshed.get("days_left") == 0 else 502
+            return web.json_response({
+                "error": refreshed.get("error") or "Could not refresh invite",
+                "active": refreshed.get("active"),
+                "days_left": refreshed.get("days_left"),
+            }, status=status)
+        invite_link = refreshed.get("url") or ""
+        days_left = int(refreshed.get("days_left") or 0)
+        tier = refreshed.get("tier") or bundle.tier
+
+    if not invite_link:
+        return web.json_response({"error": "Invite is unavailable"}, status=503)
+
+    if bundle:
+        async with async_session() as session:
+            checkout = await session.get(BundleCheckout, bundle.id)
+            current_links = list(checkout.access_links or [])
+            replacement = {
+                "project": project,
+                "label": ACCESS_PROJECT_LABELS[project],
+                "url": invite_link,
+                "days_left": days_left,
+            }
+            checkout.access_links = [
+                replacement if item.get("project") == project else item
+                for item in current_links
+                if isinstance(item, dict)
+            ]
+            if not any(item.get("project") == project for item in current_links if isinstance(item, dict)):
+                checkout.access_links = [*checkout.access_links, replacement]
+            await session.commit()
+
+    return web.json_response({
+        "ok": True,
+        "project": project,
+        "label": ACCESS_PROJECT_LABELS[project],
+        "invite_link": invite_link,
+        "days_left": days_left,
+        "tier": tier,
+        "active": True,
+    })
+
 async def api_create_stars_invoice(request: web.Request) -> web.Response:
     user_data = await parse_init_data(request)
     if not user_data:
@@ -490,14 +944,20 @@ async def api_create_stars_invoice(request: web.Request) -> web.Response:
     try:
         data = await request.json()
         tier = str(data.get("tier", "plus")).lower()
+        bundle_target = str(data.get("bundle_target") or "").lower()
         promo_code = normalize_promo_code(data.get("promo_code") or data.get("promocode") or "")
     except:
         tier = "plus"
+        bundle_target = ""
         promo_code = ""
 
     plan = MINIAPP_STARS_PLANS.get(tier)
     if not plan:
         return web.json_response({"error": "Invalid tier"}, status=400)
+    if tier == "elite" and bundle_target not in {"privateleaks", "asianleaks", "extraleaks"}:
+        return web.json_response({"error": "Choose a valid ELITE second page"}, status=400)
+    if tier == "king":
+        bundle_target = "all"
 
     user_id = user_data["user_id"]
     days = plan["days"]
@@ -521,14 +981,24 @@ async def api_create_stars_invoice(request: web.Request) -> web.Response:
             days = activation.days
             applied_promo_code = activation.code
 
-    payload = f"stars_tier_{tier}_{user_id}"
+    payload = (
+        f"stars_bundle_{tier}_{bundle_target}_{user_id}"
+        if tier in {"elite", "king"}
+        else f"stars_tier_{tier}_{user_id}"
+    )
     
     bot = Bot(token=BOT_TOKEN)
     try:
         # Генерируем реальную строку инвойса от Telegram
         invoice_link = await bot.create_invoice_link(
-            title=f"Подписка на {days} дней",
-            description="Оплата премиум доступа к ASMR.LEAKS",
+            title=f"{tier.upper()} на {days} дней",
+            description=(
+                "ASMR PRO и доступ ко всем четырём приватным страницам"
+                if tier == "king"
+                else "ASMR PRO и вторая приватная страница"
+                if tier == "elite"
+                else "Оплата премиум доступа к ASMR.LEAKS"
+            ),
             payload=payload,
             provider_token="", # Для Telegram Звезд это поле ОБЯЗАТЕЛЬНО должно быть пустым
             currency="XTR",
@@ -541,6 +1011,7 @@ async def api_create_stars_invoice(request: web.Request) -> web.Response:
             "stars": stars,
             "days": days,
             "tier": tier,
+            "bundle_target": bundle_target or None,
             "promo_code": applied_promo_code,
             "promo_days": days if applied_promo_code else None,
         })
@@ -590,6 +1061,11 @@ async def api_check_invite(request: web.Request) -> web.Response:
             return web.json_response({"invite_link": None})
         user_id = user_data["user_id"]
         async with async_session() as session:
+            bundle = await get_latest_bundle_access(session, int(user_id), consume=True)
+            if bundle:
+                payload = bundle_access_payload(bundle)
+                payload["invite_link"] = (payload.get("access_links") or [{}])[0].get("url")
+                return web.json_response(payload)
             link = await consume_pending_invite(session, int(user_id))
         return web.json_response({"invite_link": link})
     except Exception as e:
@@ -611,6 +1087,11 @@ async def api_my_invite(request: web.Request) -> web.Response:
             return web.json_response({"invite_link": None})
         user_id = user_data["user_id"]
         async with async_session() as session:
+            bundle = await get_latest_bundle_access(session, int(user_id), consume=False)
+            if bundle:
+                payload = bundle_access_payload(bundle)
+                payload["invite_link"] = (payload.get("access_links") or [{}])[0].get("url")
+                return web.json_response(payload)
             link = await get_latest_invite(session, int(user_id))
         return web.json_response({"invite_link": link})
     except Exception as e:
@@ -676,6 +1157,8 @@ async def api_get_profile(request: web.Request) -> web.Response:
                 "tier": getattr(user, 'tier', 'plus') or 'plus',
                 "tribute_plus_url": TRIBUTE_PLUS_URL,
                 "tribute_pro_url": TRIBUTE_PRO_URL,
+                "tribute_elite_url": TRIBUTE_ELITE_URL,
+                "tribute_king_url": TRIBUTE_KING_URL,
             })
     except Exception as e:
         logger.error(f"Error in api_get_profile: {e}")
@@ -1971,7 +2454,13 @@ def create_app() -> web.Application:
     app.middlewares.append(cors_middleware)
     app.router.add_get("/health", api_health)
     app.router.add_post("/tribute-webhook", tribute_webhook)
+    app.router.add_post("/internal/grant_access", internal_grant_access)
+    app.router.add_post("/internal/access_status", internal_access_status)
+    app.router.add_post("/internal/refresh_invite", internal_refresh_invite)
     app.router.add_post("/miniapp/create_stars_invoice", api_create_stars_invoice)
+    app.router.add_post("/miniapp/prepare_bundle_checkout", api_prepare_bundle_checkout)
+    app.router.add_post("/miniapp/access_links", api_access_links)
+    app.router.add_post("/miniapp/access_links/refresh", api_refresh_access_link)
     app.router.add_post("/miniapp/promo/activate", api_promo_activate)
     app.router.add_post("/miniapp/promo/apply", api_promo_activate)
     app.router.add_post("/miniapp/promo/validate", api_promo_activate)

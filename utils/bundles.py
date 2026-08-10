@@ -14,6 +14,17 @@ SOURCE_PROJECT = "asmrleaks"
 SOURCE_LABEL = "ASMR.LEAKS"
 
 
+def _peer_endpoint(project: str, path: str) -> tuple[str, str, str]:
+    peer = BUNDLE_PEERS.get(project) or {}
+    grant_url = (peer.get("grant_url") or "").strip()
+    grant_secret = (peer.get("grant_secret") or "").strip()
+    label = peer.get("label") or project
+    if not grant_url or not grant_secret:
+        return "", "", label
+    base_url = grant_url.rstrip("/").rsplit("/", 1)[0]
+    return f"{base_url}/{path.lstrip('/')}", grant_secret, label
+
+
 def bundle_projects_for_tier(tier: str, target_project: str | None = None) -> list[str]:
     safe_tier = (tier or "").lower()
     safe_target = (target_project or "").lower()
@@ -173,6 +184,166 @@ async def get_peer_access_status(*, project: str, telegram_id: int) -> dict:
                 }
     except Exception as exc:
         logger.warning("Bundle access status error for %s: %s", project, exc)
+        return {"ok": False, "project": project, "label": label, "error": str(exc)}
+
+
+async def get_peer_bundle_checkout_status(
+    *,
+    project: str,
+    telegram_id: int,
+    tier: str,
+    renewal: bool,
+) -> dict:
+    """Ask a peer whether this Tribute bundle belongs to its checkout."""
+    endpoint, grant_secret, label = _peer_endpoint(project, "bundle_checkout_status")
+    if not endpoint:
+        return {"ok": False, "project": project, "label": label, "error": "not configured"}
+
+    headers = {
+        "Authorization": f"Bearer {grant_secret}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "telegram_id": int(telegram_id),
+        "tier": (tier or "").lower(),
+        "renewal": bool(renewal),
+    }
+    try:
+        timeout = ClientTimeout(total=8)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(endpoint, json=payload, headers=headers) as response:
+                try:
+                    data = await response.json(content_type=None)
+                except Exception:
+                    data = {}
+                if response.status >= 400:
+                    return {
+                        "ok": False,
+                        "project": project,
+                        "label": label,
+                        "error": data.get("error") or f"HTTP {response.status}",
+                    }
+                return {
+                    "ok": True,
+                    "available": bool(data.get("available")),
+                    "project": project,
+                    "label": label,
+                    "created_at": data.get("created_at") or "",
+                    "target_project": data.get("target_project") or "",
+                }
+    except Exception as exc:
+        logger.warning("Bundle checkout lookup error for %s: %s", project, exc)
+        return {"ok": False, "project": project, "label": label, "error": str(exc)}
+
+
+async def route_peer_bundle_purchase(
+    *,
+    project: str,
+    telegram_id: int,
+    tier: str,
+    order_uuid: str,
+    username: str | None,
+    full_name: str | None,
+    days: int,
+    renewal: bool,
+) -> dict:
+    """Complete a shared Tribute bundle inside the source bot."""
+    endpoint, grant_secret, label = _peer_endpoint(project, "bundle_purchase")
+    if not endpoint:
+        return {"ok": False, "project": project, "label": label, "error": "not configured"}
+
+    headers = {
+        "Authorization": f"Bearer {grant_secret}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "telegram_id": int(telegram_id),
+        "tier": (tier or "").lower(),
+        "order_uuid": order_uuid,
+        "username": username or "",
+        "full_name": full_name or "",
+        "days": int(days),
+        "renewal": bool(renewal),
+    }
+    try:
+        timeout = ClientTimeout(total=35)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(endpoint, json=payload, headers=headers) as response:
+                try:
+                    data = await response.json(content_type=None)
+                except Exception:
+                    data = {}
+                if response.status >= 400:
+                    logger.warning(
+                        "Bundle purchase route failed for %s: status=%s error=%s",
+                        project,
+                        response.status,
+                        data.get("error"),
+                    )
+                    return {
+                        "ok": False,
+                        "project": project,
+                        "label": label,
+                        "error": data.get("error") or f"HTTP {response.status}",
+                    }
+                data.update({"ok": True, "project": project, "label": label})
+                return data
+    except Exception as exc:
+        logger.warning("Bundle purchase route error for %s: %s", project, exc)
+        return {"ok": False, "project": project, "label": label, "error": str(exc)}
+
+
+async def route_peer_plus_purchase(
+    *,
+    project: str,
+    telegram_id: int,
+    order_uuid: str,
+    username: str | None,
+    full_name: str | None,
+    days: int,
+) -> dict:
+    """Credit a local PLUS subscription sold through the shared Tribute account."""
+    peer = BUNDLE_PEERS.get(project) or {}
+    grant_url = (peer.get("grant_url") or "").strip()
+    grant_secret = (peer.get("grant_secret") or "").strip()
+    label = peer.get("label") or project
+    if not grant_url or not grant_secret:
+        return {"ok": False, "project": project, "label": label, "error": "not configured"}
+
+    headers = {
+        "Authorization": f"Bearer {grant_secret}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "source_project": PROJECT_KEY or SOURCE_PROJECT,
+        "order_uuid": order_uuid,
+        "telegram_id": int(telegram_id),
+        "days": int(days),
+        "tier": "plus",
+        "username": username or "",
+        "full_name": full_name or "",
+        "payment_method": "tribute",
+        "silent": False,
+    }
+    try:
+        timeout = ClientTimeout(total=15)
+        async with ClientSession(timeout=timeout) as session:
+            async with session.post(grant_url, json=payload, headers=headers) as response:
+                try:
+                    data = await response.json(content_type=None)
+                except Exception:
+                    data = {}
+                if response.status >= 400:
+                    return {
+                        "ok": False,
+                        "project": project,
+                        "label": label,
+                        "error": data.get("error") or f"HTTP {response.status}",
+                    }
+                data.update({"ok": True, "project": project, "label": label})
+                return data
+    except Exception as exc:
+        logger.warning("PLUS purchase route error for %s: %s", project, exc)
         return {"ok": False, "project": project, "label": label, "error": str(exc)}
 
 

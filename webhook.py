@@ -12,8 +12,8 @@ from aiogram.types import LabeledPrice
 from sqlalchemy import select, text as sa_text, func as sa_func, or_ as sa_or
 
 from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, BundleCheckout, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, activate_promo_code, get_active_promo_activation, consume_active_promo_days, claim_tribute_webhook_event, normalize_promo_code, apply_external_grant, prepare_bundle_checkout, get_bundle_checkout_for_tribute, complete_bundle_checkout, get_latest_bundle_access, bundle_access_payload, _auto_thumbnail
-from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, TRIBUTE_ELITE_URL, TRIBUTE_KING_URL, PROJECT_KEY, PEER_GRANT_URL, PEER_GRANT_SECRET, INTERNAL_GRANT_SECRET
-from utils.bundles import activate_bundle_access, bundle_projects_for_tier, get_peer_access_status, refresh_peer_invite, send_bundle_access_message
+from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, TRIBUTE_ELITE_URL, TRIBUTE_KING_URL, PROJECT_KEY, INTERNAL_GRANT_SECRET, BUNDLE_PEERS
+from utils.bundles import activate_bundle_access, bundle_projects_for_tier, get_peer_access_status, get_peer_bundle_checkout_status, refresh_peer_invite, route_peer_bundle_purchase, route_peer_plus_purchase, send_bundle_access_message
 
 logger = logging.getLogger(__name__)
 _background_tasks: set[asyncio.Task] = set()
@@ -389,51 +389,55 @@ async def forward_tribute_webhook(body: bytes, signature: str) -> None:
         logger.warning("Failed to forward Tribute webhook to site: %s", e)
 
 
-async def relay_privateleaks_tribute_grant(
+async def _find_bundle_checkout_source(
+    session,
     *,
-    event_key: str,
     telegram_id: int,
-    username: str = "",
-    days: int = 31,
-) -> bool:
-    """Route shared-Tribute-account PrivateLeaks PLUS payments to the PL bot."""
-    if not PEER_GRANT_URL or not PEER_GRANT_SECRET:
-        logger.warning("PrivateLeaks Tribute relay skipped: peer grant is not configured")
-        return False
+    tier: str,
+    renewal: bool,
+) -> tuple[dict | None, list[dict]]:
+    """Find the bot that prepared a shared Tribute checkout.
 
-    event_hash = hashlib.sha256(event_key.encode()).hexdigest()[:24]
-    order_uuid = f"tribute-privateleaks:{event_hash}"
-    payload = {
-        "source_project": PROJECT_KEY,
-        "order_uuid": order_uuid,
-        "telegram_id": int(telegram_id),
-        "days": int(days),
-        "tier": "plus",
-        "username": username or "",
-        "payment_method": "tribute",
-    }
-    headers = {
-        "Authorization": f"Bearer {PEER_GRANT_SECRET}",
-        "Content-Type": "application/json",
-    }
+    A failed peer lookup is treated as unsafe: crediting the first available
+    database could put a paid subscription in the wrong project.
+    """
+    candidates: list[dict] = []
+    local_checkout = await get_bundle_checkout_for_tribute(
+        session,
+        telegram_id=telegram_id,
+        tier=tier,
+        renewal=renewal,
+    )
+    if local_checkout and (renewal or local_checkout.status == "pending"):
+        event_at = (
+            local_checkout.completed_at
+            if renewal and local_checkout.completed_at
+            else local_checkout.created_at
+        )
+        candidates.append({
+            "project": PROJECT_KEY,
+            "created_at": event_at.isoformat() if event_at else "",
+            "target_project": local_checkout.target_project or "",
+            "checkout": local_checkout,
+        })
 
-    try:
-        timeout = ClientTimeout(total=10)
-        async with ClientSession(timeout=timeout) as session:
-            async with session.post(PEER_GRANT_URL, json=payload, headers=headers) as response:
-                text = await response.text()
-                if response.status >= 400:
-                    logger.warning(
-                        "PrivateLeaks Tribute relay failed: status=%s body=%s",
-                        response.status,
-                        text[:300],
-                    )
-                    return False
-                logger.info("PrivateLeaks Tribute relay accepted for user %s order %s", telegram_id, order_uuid)
-                return True
-    except Exception as exc:
-        logger.warning("PrivateLeaks Tribute relay error for user %s: %s", telegram_id, exc)
-        return False
+    peer_results = await asyncio.gather(*[
+        get_peer_bundle_checkout_status(
+            project=project,
+            telegram_id=telegram_id,
+            tier=tier,
+            renewal=renewal,
+        )
+        for project in BUNDLE_PEERS
+    ])
+    failures = [result for result in peer_results if not result.get("ok")]
+    candidates.extend(
+        result for result in peer_results
+        if result.get("ok") and result.get("available")
+    )
+    if failures or not candidates:
+        return None, failures
+    return max(candidates, key=lambda item: item.get("created_at") or ""), []
 
 @web.middleware
 async def cors_middleware(request, handler):
@@ -504,34 +508,55 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                 amount_eur = 0
 
             TRIBUTE_DAYS = 31
-            if abs(amount_eur - 3.0) < 0.001:
-                username = payload.get("telegram_username", "")
-                relayed = await relay_privateleaks_tribute_grant(
-                    event_key=event_key,
+            event_hash = hashlib.sha256(event_key.encode()).hexdigest()[:24]
+            tribute_order_uuid = f"tribute:{event_hash}"
+            username = payload.get("telegram_username", "")
+            full_name = (
+                payload.get("telegram_full_name")
+                or payload.get("telegram_name")
+                or payload.get("name")
+                or ""
+            )
+
+            # Every local PLUS product has a unique Tribute price. Route it
+            # directly to the owning bot and never touch the ASMR balance.
+            plus_project = next((
+                project
+                for price, project in (
+                    (5.5, "privateleaks"),
+                    (5.0, "asianleaks"),
+                    (3.0, "extraleaks"),
+                )
+                if abs(amount_eur - price) < 0.001
+            ), None)
+            if plus_project:
+                routed = await route_peer_plus_purchase(
+                    project=plus_project,
                     telegram_id=telegram_id,
+                    order_uuid=f"tribute-{plus_project}:{event_hash}",
                     username=username,
+                    full_name=full_name,
                     days=TRIBUTE_DAYS,
                 )
-                if not relayed:
-                    nick = f"@{username}" if username else f"id{telegram_id}"
-                    await _notify_admins(
-                        f"💳 <b>PrivateLeaks Tribute relay failed</b>\n"
-                        f"👤 {nick} | <code>{telegram_id}</code>\n"
-                        f"💰 €3.00 | ASMR not credited"
-                    )
                 logger.info(
-                    "PrivateLeaks Tribute amount routed away from ASMR: raw_amount=%s amount_eur=%.2f telegram_id=%s relayed=%s",
-                    payload.get("amount") or payload.get("price"),
+                    "Tribute PLUS routed away from ASMR: project=%s amount_eur=%.2f telegram_id=%s ok=%s",
+                    plus_project,
                     amount_eur,
                     telegram_id,
-                    relayed,
+                    routed.get("ok"),
                 )
-                if relayed:
+                if routed.get("ok"):
                     await session.commit()
-                    return web.json_response({"status": "ok", "routed": "privateleaks", "relayed": True})
+                    return web.json_response({"status": "ok", "routed": plus_project})
                 await session.rollback()
+                await _notify_admins(
+                    f"<b>Tribute PLUS routing failed</b>\n"
+                    f"Project: <code>{plus_project}</code>\n"
+                    f"User: <code>{telegram_id}</code> | EUR {amount_eur:.2f}\n"
+                    f"Error: <code>{routed.get('error') or 'unknown'}</code>"
+                )
                 return web.json_response(
-                    {"status": "retry", "routed": "privateleaks", "relayed": False},
+                    {"status": "retry", "routed": plus_project, "error": routed.get("error")},
                     status=503,
                 )
 
@@ -548,12 +573,81 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             bundle_checkout = None
             bundle_target = None
             if is_bundle:
-                bundle_checkout = await get_bundle_checkout_for_tribute(
+                renewal = event == "renewed_subscription"
+                bundle_source, lookup_failures = await _find_bundle_checkout_source(
                     session,
                     telegram_id=telegram_id,
                     tier=purchased_tier,
-                    renewal=event == "renewed_subscription",
+                    renewal=renewal,
                 )
+                if lookup_failures:
+                    failed_projects = ", ".join(
+                        item.get("project", "unknown") for item in lookup_failures
+                    )
+                    logger.warning(
+                        "Bundle source lookup failed for user %s: %s",
+                        telegram_id,
+                        failed_projects,
+                    )
+                    await session.rollback()
+                    return web.json_response(
+                        {"status": "retry", "error": "Bundle source lookup failed"},
+                        status=503,
+                    )
+                if not bundle_source:
+                    logger.warning(
+                        "No prepared %s checkout found for Telegram user %s",
+                        purchased_tier,
+                        telegram_id,
+                    )
+                    await session.rollback()
+                    return web.json_response(
+                        {"status": "retry", "error": "Bundle checkout is not prepared"},
+                        status=409,
+                    )
+
+                source_project = bundle_source.get("project")
+                if source_project != PROJECT_KEY:
+                    routed = await route_peer_bundle_purchase(
+                        project=source_project,
+                        telegram_id=telegram_id,
+                        tier=purchased_tier,
+                        order_uuid=tribute_order_uuid,
+                        username=username,
+                        full_name=full_name,
+                        days=TRIBUTE_DAYS,
+                        renewal=renewal,
+                    )
+                    if routed.get("ok"):
+                        await session.commit()
+                        logger.info(
+                            "Tribute %s routed to %s for user %s",
+                            purchased_tier,
+                            source_project,
+                            telegram_id,
+                        )
+                        return web.json_response({
+                            "status": "ok",
+                            "tier": purchased_tier,
+                            "routed": source_project,
+                        })
+                    await session.rollback()
+                    await _notify_admins(
+                        f"<b>{purchased_tier.upper()} routing failed</b>\n"
+                        f"Project: <code>{source_project}</code>\n"
+                        f"User: <code>{telegram_id}</code>\n"
+                        f"Error: <code>{routed.get('error') or 'unknown'}</code>"
+                    )
+                    return web.json_response(
+                        {
+                            "status": "retry",
+                            "routed": source_project,
+                            "error": routed.get("error"),
+                        },
+                        status=503,
+                    )
+
+                bundle_checkout = bundle_source.get("checkout")
                 bundle_target = "all" if purchased_tier == "king" else (
                     bundle_checkout.target_project if bundle_checkout else None
                 )
@@ -578,8 +672,6 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             # Никогда не понижаем admin-выданный тир (ELITE → PLUS/PRO) и не сбрасываем PRO.
             TIER_RANK = {'plus': 1, 'pro': 2, 'elite': 3}
 
-            event_hash = hashlib.sha256(event_key.encode()).hexdigest()[:24]
-            tribute_order_uuid = f"tribute:{event_hash}"
             TRIBUTE_DAYS, promo_code = await consume_active_promo_days(
                 session,
                 telegram_id=telegram_id,

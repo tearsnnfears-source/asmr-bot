@@ -26,6 +26,13 @@ MINIAPP_STARS_PLANS = {
     "king": {"days": 31, "stars": STARS_TIER_PRICES["king"]},
 }
 
+TRIBUTE_PLUS_PROJECT_BY_CENTS = {
+    300: "extraleaks",
+    525: "asianleaks",
+    549: "privateleaks",
+    550: "privateleaks",
+}
+
 
 def _schedule_background(coro) -> None:
     task = asyncio.create_task(coro)
@@ -506,6 +513,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     amount_eur = amount_eur / 100.0
             except Exception:
                 amount_eur = 0
+            amount_cents = int(round(amount_eur * 100))
 
             TRIBUTE_DAYS = 31
             event_hash = hashlib.sha256(event_key.encode()).hexdigest()[:24]
@@ -520,15 +528,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
 
             # Every local PLUS product has a unique Tribute price. Route it
             # directly to the owning bot and never touch the ASMR balance.
-            plus_project = next((
-                project
-                for price, project in (
-                    (5.5, "privateleaks"),
-                    (5.25, "asianleaks"),
-                    (3.0, "extraleaks"),
-                )
-                if abs(amount_eur - price) < 0.001
-            ), None)
+            plus_project = TRIBUTE_PLUS_PROJECT_BY_CENTS.get(amount_cents)
             if plus_project:
                 routed = await route_peer_plus_purchase(
                     project=plus_project,

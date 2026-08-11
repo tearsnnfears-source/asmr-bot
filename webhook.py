@@ -524,7 +524,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                 project
                 for price, project in (
                     (5.5, "privateleaks"),
-                    (5.0, "asianleaks"),
+                    (5.25, "asianleaks"),
                     (3.0, "extraleaks"),
                 )
                 if abs(amount_eur - price) < 0.001

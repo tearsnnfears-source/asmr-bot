@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import hmac
+import html
 import logging
 import json
 import time
@@ -481,6 +482,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
     logger.info(f"Tribute webhook event: {event}")
 
     if event in ("new_subscription", "renewed_subscription"):
+        renewal = event == "renewed_subscription"
         telegram_id = int(payload.get("telegram_user_id", 0))
         if not telegram_id:
             return web.json_response({"status": "ok"})
@@ -573,7 +575,6 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             bundle_checkout = None
             bundle_target = None
             if is_bundle:
-                renewal = event == "renewed_subscription"
                 bundle_source, lookup_failures = await _find_bundle_checkout_source(
                     session,
                     telegram_id=telegram_id,
@@ -715,6 +716,22 @@ async def tribute_webhook(request: web.Request) -> web.Response:
 
         _schedule_background(forward_tribute_webhook(body, signature))
 
+        admin_event_label = "Продление подписки" if renewal else "Новая подписка"
+        tribute_currency = str(payload.get("currency") or "EUR").upper()
+        tribute_amount = (
+            f"€{amount_eur:.2f}"
+            if tribute_currency == "EUR"
+            else f"{amount_eur:.2f} {html.escape(tribute_currency)}"
+        )
+        tribute_channel = html.escape(str(payload.get("channel_name") or "Не указан"))
+        tribute_subscription_id = html.escape(str(payload.get("subscription_id") or "Не указан"))
+        admin_payment_details = (
+            f"💶 Сумма: <b>{tribute_amount}</b>\n"
+            f"💎 Tier: <b>{purchased_tier.upper()}</b>\n"
+            f"📣 Канал: <code>{tribute_channel}</code>\n"
+            f"🧾 Subscription ID: <code>{tribute_subscription_id}</code>\n"
+        )
+
         if is_bundle:
             bundle_order_uuid = tribute_order_uuid
             bundle_bot = Bot(token=BOT_TOKEN)
@@ -745,13 +762,15 @@ async def tribute_webhook(request: web.Request) -> web.Response:
 
                 failed_projects = ", ".join(item.get("project", "unknown") for item in failures)
                 username = payload.get("telegram_username", "")
-                nick = f"@{username}" if username else f"id{telegram_id}"
+                nick = f"@{html.escape(str(username))}" if username else f"id{telegram_id}"
                 promo_line = f"\n🎟 Промокод: <code>{promo_code}</code>" if promo_code else ""
                 failure_line = f"\n⚠️ Не выданы ссылки: <code>{failed_projects}</code>" if failures else ""
                 await _notify_admins(
-                    f"💳 <b>Новая {purchased_tier.upper()} оплата — Tribute</b>\n"
+                    f"💳 <b>{admin_event_label} — Tribute</b>\n"
                     f"👤 {nick} | <code>{telegram_id}</code>\n"
-                    f"📅 +{TRIBUTE_DAYS} | Итого ASMR: {total} дн. | tier=PRO\n"
+                    f"{admin_payment_details}"
+                    f"📅 +{TRIBUTE_DAYS} дней | Итого ASMR: {total} дн.\n"
+                    f"🎙 ASMR tier: <b>PRO</b>\n"
                     f"🔗 Ссылок: {len(access_links)}"
                     f"{promo_line}{failure_line}"
                 )
@@ -781,12 +800,13 @@ async def tribute_webhook(request: web.Request) -> web.Response:
 
         # Уведомление админу о Tribute оплате
         username = payload.get("telegram_username", "")
-        nick = f"@{username}" if username else f"id{telegram_id}"
+        nick = f"@{html.escape(str(username))}" if username else f"id{telegram_id}"
         promo_line = f"\n🎟 Промокод: <code>{promo_code}</code>" if promo_code else ""
         await _notify_admins(
-            f"💳 <b>Новая оплата — Tribute</b>\n"
+            f"💳 <b>{admin_event_label} — Tribute</b>\n"
             f"👤 {nick} | <code>{telegram_id}</code>\n"
-            f"📅 +{TRIBUTE_DAYS} | Итого: {total} дн."
+            f"{admin_payment_details}"
+            f"📅 +{TRIBUTE_DAYS} дней | Итого: {total} дн."
             f"{promo_line}"
         )
 

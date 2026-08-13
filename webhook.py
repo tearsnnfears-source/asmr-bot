@@ -1780,16 +1780,22 @@ async def api_post_view(request: web.Request) -> web.Response:
 async def api_get_shorts(request: web.Request) -> web.Response:
     """GET /miniapp/shorts?limit=20 — latest shorts for home page scroll"""
     try:
-        limit = int(request.query.get('limit', 20))
+        limit = max(1, min(int(request.query.get('limit', 24)), 100))
+        offset = max(0, int(request.query.get('offset', 0)))
         async with async_session() as session:
             result = await session.execute(
                 select(ArtistContent)
                 .where(ArtistContent.content_type == "short")
-                .order_by(sa_func.random())
+                .order_by(ArtistContent.id.desc())
+                .offset(offset)
                 .limit(limit)
             )
             shorts = result.scalars().all()
-        return web.json_response({"shorts": [_content_meta(s) for s in shorts]})
+        return web.json_response({
+            "shorts": [_content_meta(s) for s in shorts],
+            "offset": offset,
+            "has_more": len(shorts) == limit,
+        })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
 

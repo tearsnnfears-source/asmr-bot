@@ -1778,23 +1778,48 @@ async def api_post_view(request: web.Request) -> web.Response:
 
 
 async def api_get_shorts(request: web.Request) -> web.Response:
-    """GET /miniapp/shorts?limit=20 — latest shorts for home page scroll"""
+    """Paged shorts; seeded random order is stable for one catalog snapshot."""
     try:
         limit = max(1, min(int(request.query.get('limit', 24)), 100))
         offset = max(0, int(request.query.get('offset', 0)))
+        seed = int(request.query.get('seed', 0))
+        max_id = max(0, int(request.query['max_id'])) if 'max_id' in request.query else None
+    except (TypeError, ValueError):
+        return web.json_response({"error": "Invalid pagination"}, status=400)
+    order = request.query.get('order', 'newest').lower()
+    if order not in ('random', 'newest', 'best'):
+        order = 'newest'
+    artist = request.query.get('artist', '').strip()
+    try:
         async with async_session() as session:
-            result = await session.execute(
-                select(ArtistContent)
-                .where(ArtistContent.content_type == "short")
-                .order_by(ArtistContent.id.desc())
-                .offset(offset)
-                .limit(limit)
-            )
+            conditions = [ArtistContent.content_type == "short"]
+            if artist:
+                conditions.append(ArtistContent.artist_name == artist)
+            if max_id is None:
+                max_id = (await session.scalar(
+                    select(sa_func.max(ArtistContent.id)).where(*conditions)
+                )) or 0
+            q = select(ArtistContent).where(*conditions, ArtistContent.id <= max_id)
+            if order == 'random':
+                from sqlalchemy import cast, String
+                q = q.order_by(
+                    sa_func.md5(cast(ArtistContent.id, String) + ':' + str(seed)),
+                    ArtistContent.id,
+                )
+            elif order == 'best':
+                q = q.order_by(ArtistContent.views.desc(), ArtistContent.id.desc())
+            else:
+                q = q.order_by(ArtistContent.id.desc())
+            result = await session.execute(q.offset(offset).limit(limit + 1))
             shorts = result.scalars().all()
         return web.json_response({
-            "shorts": [_content_meta(s) for s in shorts],
+            "shorts": [_content_meta(s) for s in shorts[:limit]],
             "offset": offset,
-            "has_more": len(shorts) == limit,
+            "next_offset": offset + min(len(shorts), limit),
+            "has_more": len(shorts) > limit,
+            "max_id": max_id,
+            "order": order,
+            "seed": seed if order == 'random' else 0,
         })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)

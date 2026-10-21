@@ -297,7 +297,7 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
                     f"🔗 Ссылок: {len(access_links)}"
                     f"{promo_line}{failure_line}"
                 )
-                await send_bundle_access_message(
+                delivered = await send_bundle_access_message(
                     bot,
                     telegram_id=user_id,
                     tier=tier,
@@ -306,6 +306,12 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
                     links=access_links,
                     lang=lang,
                 )
+                if not delivered:
+                    await _notify_admins(bot,
+                        f"<b>{tier.upper()} Stars activated; direct message not delivered</b>\n"
+                        f"User: <code>{user_id}</code>\nOrder: <code>{bundle_order_uuid}</code>\n"
+                        "Access links are saved in Mini App LINKS. Do not re-credit this payment."
+                    )
             except Exception as exc:
                 logger.error("Bundle Stars activation failed for user %s: %s", user_id, exc, exc_info=True)
                 await _notify_admins(bot,

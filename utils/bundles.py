@@ -424,7 +424,7 @@ async def send_bundle_access_message(
     local_days_left: int,
     links: list[dict],
     lang: str = "en",
-) -> None:
+) -> bool:
     rows = [
         [InlineKeyboardButton(text=f"Join {item.get('label') or item.get('project')}", url=item["url"])]
         for item in links
@@ -448,4 +448,14 @@ async def send_bundle_access_message(
             f"ASMR total: <b>{local_days_left} days</b>\n\n"
             "Use the buttons below to join every included private page. Each link is one-time and valid for 72 hours."
         )
-    await bot.send_message(telegram_id, text, parse_mode="HTML", reply_markup=keyboard)
+    try:
+        await bot.send_message(telegram_id, text, parse_mode="HTML", reply_markup=keyboard)
+    except Exception as exc:
+        # Access has already been persisted. A failed DM must not report a
+        # failed activation or trigger a second grant of paid days.
+        logger.warning(
+            "Bundle access DM delivery failed for %s (%s); links saved in Mini App LINKS",
+            telegram_id, type(exc).__name__,
+        )
+        return False
+    return True

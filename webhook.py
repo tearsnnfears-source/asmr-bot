@@ -774,7 +774,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     f"🔗 Ссылок: {len(access_links)}"
                     f"{promo_line}{failure_line}"
                 )
-                await send_bundle_access_message(
+                delivered = await send_bundle_access_message(
                     bundle_bot,
                     telegram_id=telegram_id,
                     tier=purchased_tier,
@@ -783,6 +783,12 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     links=access_links,
                     lang=lang,
                 )
+                if not delivered:
+                    await _notify_admins(
+                        f"<b>{purchased_tier.upper()} activated; direct message not delivered</b>\n"
+                        f"User: <code>{telegram_id}</code>\nOrder: <code>{bundle_order_uuid}</code>\n"
+                        "Access links are saved in Mini App LINKS. Do not re-credit this payment."
+                    )
             except Exception as exc:
                 logger.error("Bundle Tribute activation failed for %s: %s", telegram_id, exc, exc_info=True)
                 await _notify_admins(

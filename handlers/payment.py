@@ -17,6 +17,7 @@ from keyboards.inline import kb_payment, kb_plans, kb_after_payment, kb_back_to_
 from locales.texts import t
 from config import STARS_PRICES, STARS_TIER_PRICES, INVITE_LINK, GROUP_ID
 from utils.bundles import activate_bundle_access, send_bundle_access_message
+from utils.error_reporting import describe_error, format_bundle_failures, notify_admin_error
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -79,8 +80,9 @@ async def _notify_admins(bot: Bot, text: str):
     for admin_id in ADMIN_IDS:
         try:
             await bot.send_message(admin_id, text, parse_mode="HTML")
-        except Exception:
-            pass
+        except Exception as error:
+            logger.warning("Payment admin notice failed: admin=%s code=%s",
+                           admin_id, describe_error(error)["code"])
 
 # ─── Выбор тарифа ────────────────────────────────────────────────────────────
 
@@ -185,6 +187,8 @@ async def process_pre_checkout_query(pre_checkout_query: PreCheckoutQuery, bot: 
 # 2. Ловим успешную оплату и выдаем дни
 @router.message(F.successful_payment)
 async def process_successful_payment(message: Message, session: AsyncSession, bot: Bot):
+    payment_stage = "Проверка платежа Telegram Stars"
+    local_access_activated = False
     try:
         payload = message.successful_payment.invoice_payload
         # Берём ID плательщика напрямую из message — это надёжнее чем парсить payload
@@ -221,6 +225,7 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
                 logger.info("Duplicate Stars bundle charge ignored: %s", charge_id)
                 return
 
+        payment_stage = "Сохранение начисления дней ASMR"
         days, promo_code = await consume_active_promo_days(
             session,
             telegram_id=user_id,
@@ -258,6 +263,7 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
             assign_tier_badge(user)
             await session.commit()
 
+        local_access_activated = True
         lang = user.lang or "en"
 
         logger.info(f"Stars credited: user {user_id} +{days} days → total {user.units}")
@@ -266,6 +272,8 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
         promo_line = f"\n🎟 Промокод: <code>{promo_code}</code>" if promo_code else ""
 
         if is_bundle:
+            bundle_stage = "Выдача доступа связанным проектам и создание ссылок"
+            bundle_access_state = "bundle_unconfirmed"
             try:
                 access_links, failures = await activate_bundle_access(
                     bot,
@@ -278,6 +286,7 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
                     tier=tier,
                     target_project=bundle_target,
                 )
+                bundle_stage = "Сохранение ссылок пакета в Mini App LINKS"
                 await complete_bundle_checkout(
                     session,
                     telegram_id=user_id,
@@ -288,8 +297,8 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
                     access_links=access_links,
                     partial=bool(failures),
                 )
-                failed_projects = ", ".join(item.get("project", "unknown") for item in failures)
-                failure_line = f"\n⚠️ Не выданы ссылки: <code>{failed_projects}</code>" if failures else ""
+                bundle_access_state = "links_saved"
+                failure_line = format_bundle_failures(failures)
                 await _notify_admins(bot,
                     f"⭐ <b>Новая {tier.upper()} оплата — TG Stars</b>\n"
                     f"👤 {nick} | <code>{user_id}</code>\n"
@@ -297,7 +306,8 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
                     f"🔗 Ссылок: {len(access_links)}"
                     f"{promo_line}{failure_line}"
                 )
-                delivered = await send_bundle_access_message(
+                bundle_stage = "Отправка сообщения со ссылками"
+                await send_bundle_access_message(
                     bot,
                     telegram_id=user_id,
                     tier=tier,
@@ -305,18 +315,13 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
                     local_days_left=user.units,
                     links=access_links,
                     lang=lang,
+                    order_uuid=bundle_order_uuid,
                 )
-                if not delivered:
-                    await _notify_admins(bot,
-                        f"<b>{tier.upper()} Stars activated; direct message not delivered</b>\n"
-                        f"User: <code>{user_id}</code>\nOrder: <code>{bundle_order_uuid}</code>\n"
-                        "Access links are saved in Mini App LINKS. Do not re-credit this payment."
-                    )
             except Exception as exc:
-                logger.error("Bundle Stars activation failed for user %s: %s", user_id, exc, exc_info=True)
-                await _notify_admins(bot,
-                    f"⚠️ <b>{tier.upper()} Stars bundle activation failed</b>\n"
-                    f"User: <code>{user_id}</code>\nOrder: <code>{bundle_order_uuid}</code>"
+                await notify_admin_error(
+                    bot, title=f"{tier.upper()} Stars: подготовка пакета не завершена",
+                    stage=bundle_stage, error=exc, telegram_id=user_id,
+                    access_state=bundle_access_state, order_uuid=bundle_order_uuid,
                 )
             return
 
@@ -330,6 +335,7 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
 
         # Generate unique invite link and store for miniapp polling
         invite_link = INVITE_LINK
+        invite_stage = "Создание одноразового приглашения после Stars"
         try:
             from datetime import timedelta, datetime
             if GROUP_ID:
@@ -339,9 +345,14 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
                     expire_date=int((datetime.utcnow() + timedelta(hours=72)).timestamp()),
                 )
                 invite_link = link_obj.invite_link
+                invite_stage = "Сохранение приглашения после Stars"
                 await create_pending_invite(session, user_id, invite_link)
         except Exception as e:
-            logger.error(f"Failed to create invite link for {user_id}: {e}")
+            await notify_admin_error(
+                bot, title="Stars: не удалось подготовить приглашение", stage=invite_stage,
+                error=e, telegram_id=user_id, access_state="active",
+                fallback_available=bool(INVITE_LINK),
+            )
 
         if lang == "ru":
             text = (
@@ -361,14 +372,25 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
             )
 
         from keyboards.inline import kb_after_payment
-        await bot.send_message(
-            user_id, text,
-            reply_markup=kb_after_payment(lang, invite_link),
-            parse_mode="HTML"
-        )
+        try:
+            await bot.send_message(
+                user_id, text,
+                reply_markup=kb_after_payment(lang, invite_link),
+                parse_mode="HTML"
+            )
+        except Exception as error:
+            await notify_admin_error(
+                bot, title="Stars: не удалось отправить сообщение после оплаты",
+                stage="Отправка личного сообщения пользователю", error=error,
+                telegram_id=user_id, access_state="active",
+            )
 
     except Exception as e:
-        logger.error(f"Stars payment error for user {message.from_user.id}: {e}", exc_info=True)
+        await notify_admin_error(
+            bot, title="Не завершена обработка оплаты Stars", stage=payment_stage,
+            error=e, telegram_id=message.from_user.id,
+            access_state="active" if local_access_activated else "unknown",
+        )
 
 
 # ─── Активация подписки ───────────────────────────────────────────────────────

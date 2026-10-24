@@ -7,6 +7,7 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import BUNDLE_PEERS, BUNDLE_TARGETS, GROUP_ID, INVITE_LINK, PROJECT_KEY
+from utils.error_reporting import notify_admin_error
 
 logger = logging.getLogger(__name__)
 
@@ -373,7 +374,12 @@ async def activate_bundle_access(
             )
             source_invite = invite.invite_link
     except Exception as exc:
-        logger.error("Cannot create ASMR bundle invite for %s: %s", telegram_id, exc)
+        await notify_admin_error(
+            bot, title=f"{tier.upper()}: не удалось создать приглашение ASMR",
+            stage="Создание одноразовой ссылки в группу ASMR", error=exc,
+            telegram_id=telegram_id, access_state="bundle_unconfirmed",
+            order_uuid=order_uuid, fallback_available=bool(INVITE_LINK),
+        )
 
     if source_invite:
         links.append({
@@ -424,6 +430,7 @@ async def send_bundle_access_message(
     local_days_left: int,
     links: list[dict],
     lang: str = "en",
+    order_uuid: str | None = None,
 ) -> bool:
     rows = [
         [InlineKeyboardButton(text=f"Join {item.get('label') or item.get('project')}", url=item["url"])]
@@ -456,6 +463,11 @@ async def send_bundle_access_message(
         logger.warning(
             "Bundle access DM delivery failed for %s (%s); links saved in Mini App LINKS",
             telegram_id, type(exc).__name__,
+        )
+        await notify_admin_error(
+            bot, title=f"{tier_name}: не удалось отправить сообщение со ссылками",
+            stage="Отправка личного сообщения пользователю", error=exc,
+            telegram_id=telegram_id, access_state="links_saved", order_uuid=order_uuid,
         )
         return False
     return True

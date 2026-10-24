@@ -15,6 +15,7 @@ from sqlalchemy import select, text as sa_text, func as sa_func, or_ as sa_or
 from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, BundleCheckout, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, activate_promo_code, get_active_promo_activation, consume_active_promo_days, claim_tribute_webhook_event, normalize_promo_code, apply_external_grant, prepare_bundle_checkout, get_bundle_checkout_for_tribute, complete_bundle_checkout, get_latest_bundle_access, bundle_access_payload, _auto_thumbnail
 from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, TRIBUTE_ELITE_URL, TRIBUTE_KING_URL, PROJECT_KEY, INTERNAL_GRANT_SECRET, BUNDLE_PEERS
 from utils.bundles import activate_bundle_access, bundle_projects_for_tier, get_peer_access_status, get_peer_bundle_checkout_status, refresh_peer_invite, route_peer_bundle_purchase, route_peer_plus_purchase, send_bundle_access_message
+from utils.error_reporting import describe_error, format_bundle_failures, notify_admin_error
 
 logger = logging.getLogger(__name__)
 _background_tasks: set[asyncio.Task] = set()
@@ -175,8 +176,9 @@ async def _notify_admins(text: str):
         for admin_id in ADMIN_IDS:
             try:
                 await bot.send_message(admin_id, text, parse_mode="HTML")
-            except Exception:
-                pass
+            except Exception as error:
+                logger.warning("Admin payment notice failed: admin=%s code=%s",
+                               admin_id, describe_error(error)["code"])
     finally:
         await bot.session.close()
 
@@ -184,6 +186,7 @@ async def _notify_admins(text: str):
 async def _create_group_invite_for_user(telegram_id: int, store_pending: bool = False) -> str:
     """Create a one-time Telegram group invite, falling back to INVITE_LINK."""
     invite_link = INVITE_LINK or ""
+    invite_stage = "Создание одноразового приглашения в группу"
     bot = Bot(token=BOT_TOKEN)
     try:
         if GROUP_ID:
@@ -194,10 +197,15 @@ async def _create_group_invite_for_user(telegram_id: int, store_pending: bool = 
             )
             invite_link = link_obj.invite_link
         if store_pending and invite_link:
+            invite_stage = "Сохранение приглашения для Mini App"
             async with async_session() as session:
                 await create_pending_invite(session, telegram_id, invite_link)
     except Exception as e:
-        logger.error(f"Failed to create invite link for {telegram_id}: {e}")
+        await notify_admin_error(
+            bot, title="Не удалось подготовить приглашение", stage=invite_stage,
+            error=e, telegram_id=telegram_id, access_state="link_only",
+            fallback_available=bool(INVITE_LINK),
+        )
     finally:
         await bot.session.close()
     return invite_link
@@ -300,7 +308,11 @@ async def internal_grant_access(request: web.Request) -> web.Response:
                 ]])
                 await bot.send_message(telegram_id, text, parse_mode="HTML", reply_markup=keyboard)
             except Exception as exc:
-                logger.info("Cannot DM synced ASMR user %s: %s", telegram_id, exc)
+                await notify_admin_error(
+                    bot, title="Не удалось сообщить о подключении ASMR-доступа",
+                    stage="Отправка личного сообщения после синхронизации доступа",
+                    error=exc, telegram_id=telegram_id, access_state="active",
+                )
             finally:
                 await bot.session.close()
 
@@ -735,6 +747,8 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         if is_bundle:
             bundle_order_uuid = tribute_order_uuid
             bundle_bot = Bot(token=BOT_TOKEN)
+            bundle_stage = "Выдача доступа связанным проектам и создание ссылок"
+            bundle_access_state = "bundle_unconfirmed"
             try:
                 access_links, failures = await activate_bundle_access(
                     bundle_bot,
@@ -747,6 +761,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     tier=purchased_tier,
                     target_project=bundle_target,
                 )
+                bundle_stage = "Сохранение ссылок пакета в Mini App LINKS"
                 async with async_session() as bundle_session:
                     await complete_bundle_checkout(
                         bundle_session,
@@ -759,12 +774,12 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                         checkout_id=bundle_checkout_id,
                         partial=bool(failures),
                     )
+                bundle_access_state = "links_saved"
 
-                failed_projects = ", ".join(item.get("project", "unknown") for item in failures)
                 username = payload.get("telegram_username", "")
                 nick = f"@{html.escape(str(username))}" if username else f"id{telegram_id}"
                 promo_line = f"\n🎟 Промокод: <code>{promo_code}</code>" if promo_code else ""
-                failure_line = f"\n⚠️ Не выданы ссылки: <code>{failed_projects}</code>" if failures else ""
+                failure_line = format_bundle_failures(failures)
                 await _notify_admins(
                     f"💳 <b>{admin_event_label} — Tribute</b>\n"
                     f"👤 {nick} | <code>{telegram_id}</code>\n"
@@ -774,7 +789,8 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     f"🔗 Ссылок: {len(access_links)}"
                     f"{promo_line}{failure_line}"
                 )
-                delivered = await send_bundle_access_message(
+                bundle_stage = "Отправка сообщения со ссылками"
+                await send_bundle_access_message(
                     bundle_bot,
                     telegram_id=telegram_id,
                     tier=purchased_tier,
@@ -782,18 +798,13 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     local_days_left=total,
                     links=access_links,
                     lang=lang,
+                    order_uuid=bundle_order_uuid,
                 )
-                if not delivered:
-                    await _notify_admins(
-                        f"<b>{purchased_tier.upper()} activated; direct message not delivered</b>\n"
-                        f"User: <code>{telegram_id}</code>\nOrder: <code>{bundle_order_uuid}</code>\n"
-                        "Access links are saved in Mini App LINKS. Do not re-credit this payment."
-                    )
             except Exception as exc:
-                logger.error("Bundle Tribute activation failed for %s: %s", telegram_id, exc, exc_info=True)
-                await _notify_admins(
-                    f"⚠️ <b>{purchased_tier.upper()} bundle activation failed</b>\n"
-                    f"User: <code>{telegram_id}</code>\nOrder: <code>{bundle_order_uuid}</code>"
+                await notify_admin_error(
+                    bundle_bot, title=f"{purchased_tier.upper()} Tribute: подготовка пакета не завершена",
+                    stage=bundle_stage, error=exc, telegram_id=telegram_id,
+                    access_state=bundle_access_state, order_uuid=bundle_order_uuid,
                 )
             finally:
                 await bundle_bot.session.close()
@@ -818,6 +829,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
 
         bot = Bot(token=BOT_TOKEN)
         invite_link = INVITE_LINK
+        invite_stage = "Создание одноразового приглашения после Tribute"
         try:
             from datetime import timedelta
             if GROUP_ID:
@@ -827,10 +839,15 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     expire_date=int((_dt.utcnow() + timedelta(hours=72)).timestamp()),
                 )
                 invite_link = link_obj.invite_link
+                invite_stage = "Сохранение приглашения после Tribute"
                 async with async_session() as inv_session:
                     await create_pending_invite(inv_session, telegram_id, invite_link)
         except Exception as e:
-            logger.error(f"Failed to create invite link for {telegram_id}: {e}")
+            await notify_admin_error(
+                bot, title="Tribute: не удалось подготовить приглашение", stage=invite_stage,
+                error=e, telegram_id=telegram_id, access_state="active",
+                fallback_available=bool(INVITE_LINK),
+            )
 
         try:
             from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -854,7 +871,11 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             ]])
             await bot.send_message(telegram_id, text, parse_mode="HTML", reply_markup=kb)
         except Exception as e:
-            logger.error(f"Cannot notify user {telegram_id}: {e}")
+            await notify_admin_error(
+                bot, title="Tribute: не удалось отправить сообщение после оплаты",
+                stage="Отправка личного сообщения пользователю", error=e,
+                telegram_id=telegram_id, access_state="active",
+            )
         finally:
             await bot.session.close()
 
@@ -1474,7 +1495,11 @@ async def api_free_trial(request: web.Request) -> web.Response:
                     ]])
                     await bot.send_message(user_id, text, parse_mode="HTML", reply_markup=kb)
                 except Exception as e:
-                    logger.error(f"Cannot send trial invite to user {user_id}: {e}")
+                    await notify_admin_error(
+                        bot, title="Триал: не удалось отправить сообщение с приглашением",
+                        stage="Отправка личного сообщения после активации триала",
+                        error=e, telegram_id=user_id, access_state="active",
+                    )
                 finally:
                     await bot.session.close()
 

@@ -12,7 +12,8 @@ def delivery_function():
     node = next(n for n in source.body if isinstance(n, ast.AsyncFunctionDef)
                 and n.name == 'send_bundle_access_message')
     namespace = dict(Bot=object, InlineKeyboardButton=lambda **kw: kw,
-                     InlineKeyboardMarkup=lambda **kw: kw, logger=logging.getLogger('delivery-test'))
+                     InlineKeyboardMarkup=lambda **kw: kw, logger=logging.getLogger('delivery-test'),
+                     notify_admin_error=AsyncMock())
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'utils/bundles.py', 'exec'), namespace)
     return namespace['send_bundle_access_message']
 
@@ -49,8 +50,9 @@ class BundleDeliveryTests(unittest.IsolatedAsyncioTestCase):
         for file in ['webhook.py', 'handlers/payment.py']:
             source = (root / file).read_text(encoding='utf-8-sig')
             ast.parse(source)
-            self.assertIn('delivered = await send_bundle_access_message(', source)
-            self.assertIn('Do not re-credit this payment.', source)
+            self.assertIn('await send_bundle_access_message(', source)
+            self.assertIn('bundle_access_state = "bundle_unconfirmed"', source)
+            self.assertNotIn('bundle activation failed</b>', source)
 
 
 if __name__ == '__main__':

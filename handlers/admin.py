@@ -9,6 +9,7 @@ from sqlalchemy import select, func
 from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts, Tag, get_all_tags, get_tag, create_tag, delete_tag, CustomBadge, create_custom_badge, get_custom_badges, delete_custom_badge, assign_tier_badge, create_or_update_promo_code, list_promo_codes, deactivate_promo_code, PromoActivation
 from handlers.group import enable_night_mode, disable_night_mode
 from config import ADMIN_IDS, GROUP_ID, INVITE_LINK
+from utils.error_reporting import notify_admin_error
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -56,7 +57,11 @@ async def cmd_add_units(message: Message, session: AsyncSession, bot: Bot):
                     f"🔗 Join link:\n{INVITE_LINK}")
         await bot.send_message(user_id, text, parse_mode="HTML")
     except Exception as e:
-        logger.warning(f"Cannot notify user {user_id}: {e}")
+        await notify_admin_error(
+            bot, title="Ручное начисление: не удалось уведомить пользователя",
+            stage="Отправка сообщения после /add_units", error=e,
+            telegram_id=user_id, access_state="active",
+        )
 
 
 # ─── /check_user [user_id] ────────────────────────────────────────────────────

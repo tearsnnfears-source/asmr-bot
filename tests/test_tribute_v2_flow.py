@@ -187,6 +187,12 @@ class TributeV2FlowTests(unittest.IsolatedAsyncioTestCase):
             user = await session.get(User, PAYER)
             self.assertEqual(user.last_payment_method, 'tribute_v2')
 
+    async def test_signed_nonpayment_probe_is_acknowledged_without_any_grant(self):
+        status, result = await self.request({'name': 'test'})
+        self.assertEqual((status, result.get('ignored')), (200, 'unsupported_event'))
+        self.assertEqual(await self.state(), (7, 'free', False, 0))
+        self.bot.create_chat_invite_link.assert_not_awaited()
+
     def test_postgres_plan_serializes_old_and_new_tribute_account_updates(self):
         query = select(User).where(User.telegram_id == PAYER).with_for_update()
         self.assertIn('FOR UPDATE', str(query.compile(dialect=postgresql.dialect())))

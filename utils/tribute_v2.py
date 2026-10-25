@@ -168,12 +168,14 @@ def parse_paid_event(body: bytes, signature: str, settings: Settings) -> PaidEve
     verify_signature(body, signature, settings.api_key)
     try:
         data = json.loads(body)
-        if not isinstance(data, dict) or not isinstance(data.get('payload'), dict):
+        if not isinstance(data, dict):
             raise ValueError
     except (ValueError, UnicodeDecodeError):
         raise TributeV2Error('invalid_json_event', 400) from None
     if data.get('name') not in {'new_subscription', 'renewed_subscription'}:
         raise TributeV2Error('unsupported_event', 200)
+    if not isinstance(data.get('payload'), dict):
+        raise TributeV2Error('invalid_json_event', 400)
     payload = data['payload']
     telegram_id = positive_id(payload.get('telegram_user_id'))
     settings.require_test_access(telegram_id)

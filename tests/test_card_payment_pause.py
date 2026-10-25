@@ -42,6 +42,15 @@ class CardPaymentPauseTests(unittest.IsolatedAsyncioTestCase):
             self.assertLessEqual(len(text), 200)
         self.assertEqual(t("card_payment_unavailable", "unknown"), t("card_payment_unavailable", "en"))
 
+    def test_top_up_copy_uses_approved_sentence_without_store_names(self):
+        t = translation()
+        self.assertTrue(t("card_payment_unavailable", "ru").endswith(
+            "Stars можно удобно купить банковской картой прямо в Telegram."))
+        for language in ("en", "ru", "es"):
+            text = t("card_payment_unavailable", language)
+            for name in ("App Store", "Google Play", "Apple Pay", "Google Pay", "@PremiumBot"):
+                self.assertNotIn(name, text)
+
     async def test_legacy_callback_only_answers_and_never_creates_invoice(self):
         for language in ("en", "ru", "es"):
             user_lookup = AsyncMock(return_value=SimpleNamespace(lang=language))

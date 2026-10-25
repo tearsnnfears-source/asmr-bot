@@ -5,6 +5,8 @@ from aiogram import Bot
 from sqlalchemy import select
 
 from database import async_session, User
+from utils.payment_grace import load_policy
+from utils.payment_renewal import send_renewal_notice
 from handlers.group import enable_night_mode, disable_night_mode
 from locales.texts import t
 from config import GROUP_ID, NIGHT_START, NIGHT_END, INVITE_LINK, ADMIN_IDS
@@ -20,7 +22,7 @@ def _kick_reason(user) -> tuple[str, str]:
     up after a trial expired.
     """
     pm = (user.last_payment_method or '').lower()
-    if pm == 'tribute':
+    if pm in {'tribute', 'tribute_v2'}:
         return ("Tribute", "💳 Tribute grace истёк")
     if pm == 'stars':
         return ("Stars",   "⭐ Stars-подписка закончилась")
@@ -34,7 +36,7 @@ def _kick_reason(user) -> tuple[str, str]:
 
 async def daily_unit_check(bot: Bot):
     """
-    Каждую ночь в 00:01 МСК:
+    Каждую ночь в 00:00 МСК:
     - Списываем 1 день у всех активных
     - При 3 днях — предупреждение
     - При 0 — кикаем
@@ -44,22 +46,28 @@ async def daily_unit_check(bot: Bot):
     warned = 0
 
     async with async_session() as session:
+        grace_enabled = (await load_policy(session)).enabled
         result = await session.execute(
-            select(User).where(User.is_active == True, User.units > -7)
+            select(User).where(User.is_active == True)
         )
         users = result.scalars().all()
 
         GRACE_LIMIT = -7
 
         for user in users:
+            if (user.tier or '').lower() == 'lifetime':
+                continue
             payment_method = (user.last_payment_method or '').lower()
-            is_tribute = payment_method == 'tribute'
+            is_tribute = payment_method in {'tribute', 'tribute_v2'}
             is_bundle_sync = payment_method.startswith('bundle_')
-            user.units -= 1
+            cutoff = GRACE_LIMIT if is_tribute and grace_enabled else 0
+            if user.units > cutoff:
+                user.units -= 1
 
             # ── Non-tribute (Stars / Crypto / Trial): kick immediately at 0
-            if not is_tribute and user.units <= 0:
-                user.units = 0  # don't let go negative
+            if (not is_tribute or not grace_enabled) and user.units <= 0:
+                if not is_tribute:
+                    user.units = 0
                 user.tier = 'plus'
                 try:
                     await bot.ban_chat_member(GROUP_ID, user.telegram_id)
@@ -82,16 +90,18 @@ async def daily_unit_check(bot: Bot):
                             pass
                 except Exception as e:
                     logger.error(f"Kick error {user.telegram_id}: {e}")
+                if is_tribute and not user.is_active:
+                    try:
+                        await send_renewal_notice(bot, user)
+                    except Exception:
+                        logger.warning("Could not deliver Tribute expiry notice")
                 continue
 
             # ── Tribute only: grace period logic
             if user.units == 0:
                 # Day 0 — warn, start grace
                 try:
-                    lang = user.lang or "en"
-                    msg = ("⏰ <b>Подписка закончилась!</b>\n\nУ тебя есть <b>7 дней</b> чтобы продлить и не потерять доступ." if lang == "ru"
-                           else "⏰ <b>Your subscription has ended!</b>\n\nYou have <b>7 grace days</b> to renew before losing access.")
-                    await bot.send_message(user.telegram_id, msg, parse_mode="HTML")
+                    await send_renewal_notice(bot, user, grace_remaining=7)
                 except Exception:
                     pass
 
@@ -99,10 +109,7 @@ async def daily_unit_check(bot: Bot):
                 # Grace period days -1..-6
                 remaining = 7 - abs(user.units)
                 try:
-                    lang = user.lang or "en"
-                    msg = (f"⚠️ <b>Льготный период: {remaining} дн. осталось</b>\nПродли подписку, иначе потеряешь доступ." if lang == "ru"
-                           else f"⚠️ <b>Grace period: {remaining} day(s) left</b>\nRenew now to keep your access.")
-                    await bot.send_message(user.telegram_id, msg, parse_mode="HTML")
+                    await send_renewal_notice(bot, user, grace_remaining=remaining)
                 except Exception:
                     pass
 
@@ -132,10 +139,17 @@ async def daily_unit_check(bot: Bot):
                     logger.error(f"Cannot kick {user.telegram_id}: {e}")
 
                 try:
-                    lang = user.lang or "en"
-                    await bot.send_message(user.telegram_id, t("kicked_message", lang), parse_mode="HTML")
+                    if not user.is_active:
+                        await send_renewal_notice(bot, user)
                 except Exception:
                     pass
+
+            elif is_tribute and user.units in {3, 1}:
+                try:
+                    await send_renewal_notice(bot, user)
+                    warned += 1
+                except Exception:
+                    logger.warning("Could not deliver Tribute renewal notice")
 
             elif user.units == 3 and not is_bundle_sync:
                 # Напоминание за 3 дня
@@ -167,10 +181,10 @@ async def daily_unit_check(bot: Bot):
 def setup_scheduler(bot: Bot) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 
-    # Ежедневное списание дней — 00:01 МСК
+    # Ежедневное списание дней — 00:00 МСК
     scheduler.add_job(
         daily_unit_check,
-        CronTrigger(hour=0, minute=1, timezone="Europe/Moscow"),
+        CronTrigger(hour=0, minute=0, timezone="Europe/Moscow"),
         args=[bot],
         id="daily_check",
     )

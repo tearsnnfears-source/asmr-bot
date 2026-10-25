@@ -11,6 +11,7 @@ except ImportError:
     ButtonStyle = None
     _HAS_STYLE = False
 from sqlalchemy.ext.asyncio import AsyncSession
+from utils.payment_grace import load_policy
 
 from database import get_or_create_user
 from keyboards.inline import kb_language, kb_language_change
@@ -136,13 +137,16 @@ async def _show_language_selection(message: Message):
 async def _show_profile(message: Message, user, edit: bool = False):
     lang = user.lang or "en"
     username = f"@{user.username}" if user.username else "—"
+    grace_policy = await load_policy()
 
     if user.units > 9000:
         sub_line = "∞ Unlimited" if lang == "en" else "∞ Безлимит"
     elif user.units > 0:
         sub_line = (f"📅 {user.units} days remaining" if lang == "en"
                     else f"📅 Осталось {user.units} дней")
-    elif user.units < 0:
+    elif (grace_policy.enabled and user.is_active
+          and (user.last_payment_method or "").lower() in {"tribute", "tribute_v2"}
+          and -7 < user.units <= 0):
         grace = 7 - abs(user.units)
         sub_line = (f"⏳ Grace period — {grace} day(s) left" if lang == "en"
                     else f"⏳ Льготный период — {grace} дн.")

@@ -4,6 +4,7 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
+from utils.payment_grace import load_policy
 from sqlalchemy import select, func
 
 from database import User, get_user, Artist, get_artist, get_all_artists, create_artist, delete_artist, update_artist_stats, set_artist_tag, ArtistContent, add_artist_content, get_artist_content, clear_artist_content, get_artist_content_counts, Tag, get_all_tags, get_tag, create_tag, delete_tag, CustomBadge, create_custom_badge, get_custom_badges, delete_custom_badge, assign_tier_badge, create_or_update_promo_code, list_promo_codes, deactivate_promo_code, PromoActivation
@@ -333,6 +334,7 @@ async def cmd_admin_help(message: Message):
         "/users_tiers — активные юзеры с тирами и днями\n"
         "/sync_tier_badges — выдать бейджи PLUS/PRO/ELITE всем по тиру\n"
         "/fix_grace — убрать grace у не-tribute пользователей (одноразово)\n"
+        "/payment_grace off|on|status — grace со следующих 00:00 МСК\n"
         "/create_code [CODE] [дней] [лимит] — промокод на дни после оплаты\n"
         "/codes — список всех промокодов\n"
         "/del_code [CODE] — отключить промокод\n"
@@ -593,11 +595,14 @@ async def cmd_active_users(message: Message, session: AsyncSession):
         return
 
     from sqlalchemy import or_, and_
+    grace_enabled = (await load_policy(session)).enabled
     result = await session.execute(
         select(User).where(
             or_(
                 User.units > 0,  # active subscribers
-                and_(User.units < 0, User.last_payment_method == 'tribute', User.is_active == True)  # tribute grace only
+                and_(User.units <= 0, User.units > -7,
+                     User.last_payment_method.in_(['tribute', 'tribute_v2']),
+                     User.is_active == True) if grace_enabled else False
             )
         ).order_by(User.units.desc())
     )
@@ -649,7 +654,10 @@ async def cmd_analytics(message: Message, session: AsyncSession):
     # Total users
     total_users   = (await session.execute(_t("SELECT COUNT(*) FROM users"))).scalar() or 0
     active_users  = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE units > 0"))).scalar() or 0
-    grace_users   = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE units BETWEEN -7 AND 0 AND is_active = TRUE"))).scalar() or 0
+    grace_users = ((await session.execute(_t(
+        "SELECT COUNT(*) FROM users WHERE units > -7 AND units <= 0 "
+        "AND is_active = TRUE AND last_payment_method IN ('tribute', 'tribute_v2')"
+    ))).scalar() or 0) if (await load_policy(session)).enabled else 0
     trial_users   = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE trial_used = TRUE"))).scalar() or 0
 
     # Conversion: trial → paid (has trial AND has ever paid)
@@ -660,7 +668,7 @@ async def cmd_analytics(message: Message, session: AsyncSession):
 
     # Payment methods breakdown
     stars_count   = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE last_payment_method = 'stars' AND units > 0"))).scalar() or 0
-    tribute_count = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE last_payment_method = 'tribute' AND units > 0"))).scalar() or 0
+    tribute_count = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE last_payment_method IN ('tribute', 'tribute_v2') AND units > 0"))).scalar() or 0
 
     # Tier breakdown
     plus_count  = (await session.execute(_t("SELECT COUNT(*) FROM users WHERE tier = 'plus'  AND units > 0"))).scalar() or 0

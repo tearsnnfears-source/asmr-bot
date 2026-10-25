@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from database import get_user, User
+from utils.payment_grace import has_paid_access, load_policy
 from config import GROUP_ID, ADMIN_IDS
 
 router = Router()
@@ -95,16 +96,9 @@ async def on_new_member(event: ChatMemberUpdated, bot: Bot, session: AsyncSessio
         return
 
     user = await get_user(session, new_member.id)
-    has_paid_access = bool(
-        user
-        and user.is_active
-        and (
-            user.units > 0
-            or ((user.last_payment_method or "") == "tribute" and user.units > -7)
-        )
-    )
+    paid_access = has_paid_access(user, await load_policy(session))
 
-    if not has_paid_access:
+    if not paid_access:
         try:
             await bot.ban_chat_member(GROUP_ID, new_member.id)
             await bot.unban_chat_member(GROUP_ID, new_member.id)

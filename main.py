@@ -10,7 +10,9 @@ from aiohttp import web
 from database import init_db
 from utils.middleware import DatabaseMiddleware
 from utils.scheduler import setup_scheduler
+from handlers import payment_grace
 from handlers import start, cabinet, payment, group, admin, favorites
+from handlers import tribute_v2
 from handlers import poster as poster_handler
 from webhook import create_app
 from config import BOT_TOKEN
@@ -33,9 +35,11 @@ async def main():
 
     dp.include_router(group.router)
     dp.include_router(start.router)
+    dp.include_router(tribute_v2.router)
     dp.include_router(cabinet.router)
     dp.include_router(payment.router)
     dp.include_router(admin.router)
+    dp.include_router(payment_grace.router)
     dp.include_router(favorites.router)
     dp.include_router(poster_handler.router)
 

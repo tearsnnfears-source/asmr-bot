@@ -5,6 +5,7 @@ import html
 import logging
 import json
 import time
+import os
 import urllib.parse
 from datetime import datetime as _dt, timedelta, timezone
 from aiohttp import ClientSession, ClientTimeout, web
@@ -16,6 +17,7 @@ from database import async_session, User, PendingPayment, Artist, get_all_artist
 from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, TRIBUTE_ELITE_URL, TRIBUTE_KING_URL, PROJECT_KEY, INTERNAL_GRANT_SECRET, BUNDLE_PEERS
 from utils.bundles import activate_bundle_access, bundle_projects_for_tier, get_peer_access_status, get_peer_bundle_checkout_status, refresh_peer_invite, route_peer_bundle_purchase, route_peer_plus_purchase, send_bundle_access_message
 from utils.error_reporting import describe_error, format_bundle_failures, notify_admin_error
+from utils.tribute_v2 import Settings as TributeV2Settings, TributeV2Error, parse_paid_event
 
 logger = logging.getLogger(__name__)
 _background_tasks: set[asyncio.Task] = set()
@@ -472,13 +474,29 @@ async def cors_middleware(request, handler):
     response.headers['Access-Control-Allow-Origin'] = '*'
     return response
 
-async def tribute_webhook(request: web.Request) -> web.Response:
+async def tribute_v2_webhook(request: web.Request) -> web.Response:
+    try:
+        settings = TributeV2Settings.from_env(os.environ)
+        payment = parse_paid_event(await request.read(), request.headers.get('trbt-signature', ''), settings)
+        # Start with the explicitly approved EUR 1 ASMR PLUS test only.
+        if payment.product.code != 's1ajK':
+            raise TributeV2Error('product_not_enabled_for_first_test')
+    except TributeV2Error as error:
+        if error.status == 200:
+            return web.json_response({'status': 'ok', 'ignored': error.code})
+        return web.json_response({'error': error.code}, status=error.status)
+    return await tribute_webhook(request, _v2_payment=payment)
+
+
+async def tribute_webhook(request: web.Request, *, _v2_payment=None) -> web.Response:
+    if _v2_payment is None:
+        return web.json_response({"error": "legacy_tribute_retired"}, status=410)
     body = await request.read()
     signature = request.headers.get("trbt-signature", "")
-    if TRIBUTE_API_KEY and not signature:
+    if _v2_payment is None and TRIBUTE_API_KEY and not signature:
         logger.warning("Missing Tribute signature")
         return web.Response(status=403)
-    if TRIBUTE_API_KEY:
+    if _v2_payment is None and TRIBUTE_API_KEY:
         expected = hmac.new(TRIBUTE_API_KEY.encode(), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(expected, signature):
             logger.warning("Invalid Tribute signature")
@@ -499,7 +517,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
         if not telegram_id:
             return web.json_response({"status": "ok"})
 
-        event_key = _tribute_event_key(data)
+        event_key = _v2_payment.event_key if _v2_payment else _tribute_event_key(data)
         order_uuid = payload.get("uuid") or None
 
         async with async_session() as session:
@@ -514,7 +532,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                 logger.info("Duplicate Tribute event ignored: %s", event_key)
                 return web.json_response({"status": "ok", "duplicate": True})
 
-            result = await session.execute(select(User).where(User.telegram_id == telegram_id))
+            result = await session.execute(select(User).where(User.telegram_id == telegram_id).with_for_update())
             user = result.scalar_one_or_none()
 
             # Tribute шлёт сумму в МИНОРНЫХ единицах (центах), e.g. 540 для 5.40 EUR.
@@ -527,11 +545,13 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     amount_eur = amount_eur / 100.0
             except Exception:
                 amount_eur = 0
+            if _v2_payment:
+                amount_eur = payload['price'] / 100.0
             amount_cents = int(round(amount_eur * 100))
 
             TRIBUTE_DAYS = 31
             event_hash = hashlib.sha256(event_key.encode()).hexdigest()[:24]
-            tribute_order_uuid = f"tribute:{event_hash}"
+            tribute_order_uuid = _v2_payment.order_uuid if _v2_payment else f"tribute:{event_hash}"
             username = payload.get("telegram_username", "")
             full_name = (
                 payload.get("telegram_full_name")
@@ -542,7 +562,9 @@ async def tribute_webhook(request: web.Request) -> web.Response:
 
             # Every local PLUS product has a unique Tribute price. Route it
             # directly to the owning bot and never touch the ASMR balance.
-            plus_project = TRIBUTE_PLUS_PROJECT_BY_CENTS.get(amount_cents)
+            plus_project = (
+                _v2_payment.product.project if _v2_payment and _v2_payment.product.project != PROJECT_KEY else None
+            ) if _v2_payment else TRIBUTE_PLUS_PROJECT_BY_CENTS.get(amount_cents)
             if plus_project:
                 routed = await route_peer_plus_purchase(
                     project=plus_project,
@@ -574,7 +596,9 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                     status=503,
                 )
 
-            if abs(amount_eur - 13.0) < 0.001:
+            if _v2_payment:
+                purchased_tier = _v2_payment.product.tier
+            elif abs(amount_eur - 13.0) < 0.001:
                 purchased_tier = "king"
             elif abs(amount_eur - 10.0) < 0.001:
                 purchased_tier = "elite"
@@ -683,22 +707,26 @@ async def tribute_webhook(request: web.Request) -> web.Response:
             )
 
             # Никогда не понижаем admin-выданный тир (ELITE → PLUS/PRO) и не сбрасываем PRO.
-            TIER_RANK = {'plus': 1, 'pro': 2, 'elite': 3}
+            TIER_RANK = {'free': 0, 'plus': 1, 'pro': 2, 'elite': 3}
 
-            TRIBUTE_DAYS, promo_code = await consume_active_promo_days(
-                session,
-                telegram_id=telegram_id,
-                default_days=31,
-                payment_method="tribute",
-                order_uuid=tribute_order_uuid,
-            )
+            if _v2_payment:
+                # The private fixed-price test must not consume an unrelated saved promo.
+                TRIBUTE_DAYS, promo_code = _v2_payment.product.days, None
+            else:
+                TRIBUTE_DAYS, promo_code = await consume_active_promo_days(
+                    session,
+                    telegram_id=telegram_id,
+                    default_days=31,
+                    payment_method="tribute",
+                    order_uuid=tribute_order_uuid,
+                )
             if not user:
                 user = User(
                     telegram_id=telegram_id,
                     username=payload.get("telegram_username"),
                     units=TRIBUTE_DAYS,
                     is_active=True,
-                    last_payment_method="tribute",
+                    last_payment_method="tribute_v2" if _v2_payment else "tribute",
                     tier=local_tier,
                 )
                 session.add(user)
@@ -708,7 +736,7 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                 base = max(0, user.units)
                 user.units = base + TRIBUTE_DAYS
                 user.is_active = True
-                user.last_payment_method = "tribute"
+                user.last_payment_method = "tribute_v2" if _v2_payment else "tribute"
                 # Tier: только апгрейд. ELITE/PRO нельзя автоматически понизить через Tribute.
                 current_rank = TIER_RANK.get((user.tier or 'plus').lower(), 1)
                 new_rank     = TIER_RANK.get(local_tier, 1)
@@ -726,7 +754,8 @@ async def tribute_webhook(request: web.Request) -> web.Response:
                 else None
             )
 
-        _schedule_background(forward_tribute_webhook(body, signature))
+        if _v2_payment is None:
+            _schedule_background(forward_tribute_webhook(body, signature))
 
         admin_event_label = "Продление подписки" if renewal else "Новая подписка"
         tribute_currency = str(payload.get("currency") or "EUR").upper()
@@ -2628,6 +2657,7 @@ def create_app() -> web.Application:
     app.middlewares.append(cors_middleware)
     app.router.add_get("/health", api_health)
     app.router.add_post("/tribute-webhook", tribute_webhook)
+    app.router.add_post("/callbacks/membership", tribute_v2_webhook)
     app.router.add_post("/internal/grant_access", internal_grant_access)
     app.router.add_post("/internal/access_status", internal_access_status)
     app.router.add_post("/internal/refresh_invite", internal_refresh_invite)

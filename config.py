@@ -11,19 +11,19 @@ DATABASE_URL    = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./asmr.db")
 WEBHOOK_HOST    = os.getenv("WEBHOOK_HOST", "")
 
 # Tribute (SBP / Card)
-TRIBUTE_BOT_URL     = os.getenv("TRIBUTE_BOT_URL", "")
+TRIBUTE_BOT_URL = ""  # Retired account; V2 checkout stays separately gated.
 TRIBUTE_API_KEY     = os.getenv("TRIBUTE_API_KEY", "")
-TRIBUTE_DONATE_LINK = os.getenv("TRIBUTE_DONATE_LINK", "")
+TRIBUTE_DONATE_LINK = ""  # Retired account; V2 checkout stays separately gated.
 TRIBUTE_SITE_WEBHOOK_URL = os.getenv(
     "TRIBUTE_SITE_WEBHOOK_URL",
     "https://play.asmrleaks.tv/api/payments/tribute/webhook",
 )
 
 # Tribute per-tier links  (startapp code → tier)
-TRIBUTE_PLUS_URL    = os.getenv("TRIBUTE_PLUS_URL",  "https://t.me/tribute/app?startapp=sQSn")
-TRIBUTE_PRO_URL     = os.getenv("TRIBUTE_PRO_URL",   "https://t.me/tribute/app?startapp=sT5D")
-TRIBUTE_ELITE_URL   = os.getenv("TRIBUTE_ELITE_URL", "https://t.me/tribute/app?startapp=sT5E")
-TRIBUTE_KING_URL    = os.getenv("TRIBUTE_KING_URL",  "https://t.me/tribute/app?startapp=s10Vq")
+TRIBUTE_PLUS_URL = ""  # Retired account; V2 checkout stays separately gated.
+TRIBUTE_PRO_URL = ""  # Retired account; V2 checkout stays separately gated.
+TRIBUTE_ELITE_URL = ""  # Retired account; V2 checkout stays separately gated.
+TRIBUTE_KING_URL = ""  # Retired account; V2 checkout stays separately gated.
 TRIBUTE_ELITE_MIN_EUR = float(os.getenv("TRIBUTE_ELITE_MIN_EUR", "9") or "9")
 
 # startapp code → tier (used in webhook to auto-assign tier)

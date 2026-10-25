@@ -1,5 +1,5 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from config import STARS_PRICES, TRIBUTE_BOT_URL
+from config import STARS_PRICES
 from locales.texts import t
 
 
@@ -60,12 +60,9 @@ def kb_plans(lang: str) -> InlineKeyboardMarkup:
 
 def kb_payment(lang: str, days: int) -> InlineKeyboardMarkup:
     stars = STARS_PRICES[days]
-    tribute_url = TRIBUTE_BOT_URL or None
     if lang == "ru":
-        tribute_btn = (
-            InlineKeyboardButton(text=f"🏦 Оплатить по СБП / Карте", url=tribute_url)
-            if tribute_url
-            else InlineKeyboardButton(text=f"🏦 СБП / Карта (Tribute)", callback_data=f"pay:tribute:{days}")
+        tribute_btn = InlineKeyboardButton(
+            text="🏦 СБП / Карта", callback_data=f"pay:tribute:{days}"
         )
         rows = [
             [tribute_btn],
@@ -74,10 +71,8 @@ def kb_payment(lang: str, days: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=t("back", lang), callback_data="subscribe")],
         ]
     else:
-        card_btn = (
-            InlineKeyboardButton(text=f"💳 Buy with Card (Tribute)", url=tribute_url)
-            if tribute_url
-            else InlineKeyboardButton(text=f"💳 Buy with Card (Tribute)", callback_data=f"pay:tribute:{days}")
+        card_btn = InlineKeyboardButton(
+            text="💳 Card / SBP", callback_data=f"pay:tribute:{days}"
         )
         rows = [
             [card_btn],

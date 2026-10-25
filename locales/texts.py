@@ -1,4 +1,9 @@
 TEXTS = {
+    "card_payment_unavailable": {
+        "en": "Card/SBP is temporarily unavailable. Pay with Telegram Stars. Buy Stars with a card via App Store, Google Play or @PremiumBot. Methods vary by country and device.",
+        "ru": "Карта и СБП временно недоступны. Оплатите Telegram Stars. Stars можно купить картой через App Store, Google Play или @PremiumBot. Способы зависят от страны и устройства.",
+        "es": "Tarjeta/SBP no disponible temporalmente. Paga con Telegram Stars. Compra Stars con tarjeta en App Store, Google Play o @PremiumBot. Los métodos dependen del país y dispositivo.",
+    },
     "welcome": {
         "en": (
             "👋 Hello! Welcome to <b>asmrleaks.tv</b> community bot.\n\n"

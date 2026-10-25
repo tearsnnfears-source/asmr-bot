@@ -119,15 +119,13 @@ async def cb_crypto(call: CallbackQuery, session: AsyncSession):
     await call.answer(msg, show_alert=True)
 
 
-# ─── Tribute — редирект на внешнюю ссылку ────────────────────────────────────
+# Card/SBP is temporarily paused; old callback buttons remain safe to press.
 
 @router.callback_query(F.data.startswith("pay:tribute:"))
 async def cb_tribute(call: CallbackQuery, session: AsyncSession):
     user = await get_or_create_user(session, call.from_user.id)
     lang = user.lang or "en"
-    # Если TRIBUTE_BOT_URL не задан — покажем сообщение
-    msg = "💳 Card payment via Tribute — link will appear here after setup."
-    await call.answer(msg, show_alert=True)
+    await call.answer(t("card_payment_unavailable", lang), show_alert=True)
 
 # ─── Telegram Stars ───────────────────────────────────────────────────────────
 

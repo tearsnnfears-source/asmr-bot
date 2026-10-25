@@ -1,5 +1,6 @@
 """Project-local crypto invoices; no website settings or Tribute policy are changed."""
 import logging
+import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -79,10 +80,35 @@ async def set_mode(session, value, admin_id):
     return value
 
 
-async def settings():
+def test_scope():
+    value = os.getenv('PLISIO_TEST_MODE', 'false').strip().lower()
+    if value not in {'true', 'false'}:
+        raise CryptoError('Invalid Plisio test configuration', 503)
+    if value == 'false':
+        return None
+    raw = os.getenv('PLISIO_TEST_TELEGRAM_ID', '').strip()
+    if not re.fullmatch(r'[1-9][0-9]{0,18}', raw) or int(raw) >= 2**63:
+        raise CryptoError('A single valid Plisio test account is required', 503)
+    return int(raw)
+
+
+async def provider_for(session, telegram_id=None, tier=None):
+    provider = await mode(session)
+    if provider != 'plisio':
+        return 'manual'
+    tester = test_scope()
+    if tester is not None and (PROJECT_KEY != 'asmrleaks' or type(telegram_id) is not int
+                               or telegram_id != tester or tier != 'plus'):
+        return 'manual'
+    return 'plisio'
+
+
+async def settings(telegram_id=None, tier=None):
     async with async_session() as session:
-        provider = await mode(session)
+        provider = await provider_for(session, telegram_id, tier)
     return {'provider': provider, 'ready': provider == 'manual' or bool(api_key()),
+            'test_only': provider == 'plisio' and test_scope() is not None,
+            'price_cents': 600 if provider == 'plisio' and test_scope() is not None else None,
             'methods': [{'key': key, 'asset': asset, 'network': network}
                         for key, (_, asset, network) in METHODS.items()]}
 
@@ -142,7 +168,7 @@ async def create_order(telegram_id, body):
             if (existing.telegram_id, existing.tier, existing.target, existing.coin) != (telegram_id, tier, target, coin):
                 raise CryptoError('Checkout request does not match', 409)
             return public_order(existing)
-        if await mode(session) != 'plisio':
+        if await provider_for(session, telegram_id, tier) != 'plisio':
             return {'provider': 'manual'}
         if not api_key():
             raise CryptoError('Plisio is temporarily unavailable. Contact support.', 503)

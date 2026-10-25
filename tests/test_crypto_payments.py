@@ -112,7 +112,7 @@ class CryptoPayments(unittest.IsolatedAsyncioTestCase):
             DateTime=__import__('sqlalchemy').DateTime, Integer=Integer, String=String, UniqueConstraint=UniqueConstraint,
             select=select, func=func, IntegrityError=IntegrityError, datetime=datetime,
             timedelta=__import__('datetime').timedelta, timezone=__import__('datetime').timezone,
-            uuid=uuid, re=__import__('re'), logging=logging,
+            uuid=uuid, re=__import__('re'), logging=logging, os=os,
             PROJECT_KEY='privateleaks', PROJECTS=PROJECTS, PRODUCTS=PRODUCTS, METHODS=METHODS,
             BOT_TOKEN='fixture', GROUP_ID=-1001, INVITE_LINK='', ADMIN_IDS=[1], MINIAPP_URL='https://example.test/app',
             get_or_create_user=user, assign_tier_badge=lambda _: None, AsyncSession=object,
@@ -129,7 +129,8 @@ class CryptoPayments(unittest.IsolatedAsyncioTestCase):
         self.Order, self.Setting = self.ns['CryptoOrder'], self.ns['CryptoSetting']
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        self.env = patch.dict(os.environ, {'PLISIO_API_KEY': 'OFFLINE_FIXTURE_ONLY'})
+        self.env = patch.dict(os.environ, {'PLISIO_API_KEY': 'OFFLINE_FIXTURE_ONLY',
+            'PLISIO_TEST_MODE': 'false', 'PLISIO_TEST_TELEGRAM_ID': ''})
         self.env.start()
 
     async def asyncTearDown(self):
@@ -322,6 +323,64 @@ class CryptoPayments(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status, 429)
         self.assertEqual(self.request.await_count, 5)
 
+    async def test_closed_scope_returns_plisio_only_to_one_account_and_plus(self):
+        self.ns['PROJECT_KEY'] = 'asmrleaks'
+        await self.enable()
+        with patch.dict(os.environ, {'PLISIO_TEST_MODE': 'true', 'PLISIO_TEST_TELEGRAM_ID': '77'}):
+            allowed = await self.ns['settings'](telegram_id=77, tier='plus')
+            self.assertEqual((allowed['provider'], allowed['test_only'], allowed['price_cents']), ('plisio', True, 600))
+            for uid, tier in [(78, 'plus'), (None, 'plus'), (0, 'plus'), (77, 'pro'),
+                              (77, 'elite'), (77, 'king'), (77, None)]:
+                self.assertEqual((await self.ns['settings'](telegram_id=uid, tier=tier))['provider'], 'manual')
+            self.ns['PROJECT_KEY'] = 'asianleaks'
+            await self.enable()
+            self.assertEqual((await self.ns['settings'](telegram_id=77, tier='plus'))['provider'], 'manual')
+
+    async def test_closed_scope_rejects_client_spoofing_without_any_invoice_or_user(self):
+        self.ns['PROJECT_KEY'] = 'asmrleaks'
+        await self.enable()
+        with patch.dict(os.environ, {'PLISIO_TEST_MODE': 'true', 'PLISIO_TEST_TELEGRAM_ID': '77'}):
+            for uid, tier, target in [(78, 'plus', ''), (77, 'pro', ''),
+                                      (77, 'elite', 'asianleaks'), (77, 'king', 'all')]:
+                result = await self.ns['create_order'](uid, {'tier': tier, 'coin': 'btc',
+                    'request_id': str(uuid.uuid4()), 'bundle_target': target,
+                    'telegram_id': 77, 'provider': 'plisio', 'price_cents': 1})
+                self.assertEqual(result, {'provider': 'manual'})
+            self.request.assert_not_awaited()
+            async with self.sessions() as session:
+                self.assertEqual(await session.scalar(select(func.count()).select_from(self.User)), 0)
+                self.assertEqual(await session.scalar(select(func.count()).select_from(self.Order)), 0)
+
+    async def test_closed_scope_allowed_invoice_keeps_normal_six_euro_price(self):
+        self.ns['PROJECT_KEY'] = 'asmrleaks'
+        await self.enable()
+        with patch.dict(os.environ, {'PLISIO_TEST_MODE': 'true', 'PLISIO_TEST_TELEGRAM_ID': '77'}):
+            result, _ = await self.create(price_cents=1, days=9999)
+        self.assertEqual((result['provider'], result['price_cents'], result['days']), ('plisio', 600, 31))
+        self.assertEqual(self.request.await_args.args[1]['source_amount'], '6.00')
+        self.assertEqual(await self.balance(), (7, 'free', 0))
+
+    async def test_closed_scope_invalid_configuration_fails_closed(self):
+        self.ns['PROJECT_KEY'] = 'asmrleaks'
+        await self.enable()
+        for values in [{'PLISIO_TEST_MODE': 'typo'}, {'PLISIO_TEST_MODE': 'true', 'PLISIO_TEST_TELEGRAM_ID': ''},
+                       {'PLISIO_TEST_MODE': 'true', 'PLISIO_TEST_TELEGRAM_ID': '77,78'},
+                       {'PLISIO_TEST_MODE': 'true', 'PLISIO_TEST_TELEGRAM_ID': '0'}]:
+            with patch.dict(os.environ, values):
+                with self.assertRaises(CryptoError): await self.ns['settings'](telegram_id=77, tier='plus')
+        self.request.assert_not_awaited()
+
+    async def test_manual_command_stops_new_test_invoices_but_not_an_existing_receipt(self):
+        self.ns['PROJECT_KEY'] = 'asmrleaks'
+        await self.enable()
+        with patch.dict(os.environ, {'PLISIO_TEST_MODE': 'true', 'PLISIO_TEST_TELEGRAM_ID': '77'}):
+            original, body = await self.create()
+            await self.enable('manual')
+            self.assertEqual((await self.ns['settings'](telegram_id=77, tier='plus'))['provider'], 'manual')
+            self.assertEqual((await self.create())[0], {'provider': 'manual'})
+            self.assertEqual(await self.ns['create_order'](77, body), original)
+            self.assertEqual(self.request.await_count, 1)
+
 
 class RoutesAndCommand(unittest.IsolatedAsyncioTestCase):
     def routes(self, authenticated=True):
@@ -358,6 +417,12 @@ class RoutesAndCommand(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.headers['Cache-Control'], 'private, no-store')
         ns['create_order'].assert_awaited_once_with(77, payload)
 
+    async def test_config_scope_uses_authenticated_user_and_selected_tier(self):
+        routes, ns = self.routes()
+        request = SimpleNamespace(json=AsyncMock(return_value={'tier': 'PRO', 'telegram_id': 999}))
+        self.assertEqual((await routes['/miniapp/crypto/config'](request)).status, 200)
+        ns['settings'].assert_awaited_once_with(telegram_id=77, tier='pro')
+
     async def test_signed_callback_still_requires_stored_invoice_and_provider_lookup(self):
         routes, ns = self.routes()
         @asynccontextmanager
@@ -376,7 +441,8 @@ class RoutesAndCommand(unittest.IsolatedAsyncioTestCase):
 
     async def test_admin_command_requires_admin_private_chat_and_valid_action(self):
         ns = dict(ADMIN_IDS=[1], mode=AsyncMock(return_value='manual'), set_mode=AsyncMock(return_value='plisio'),
-                  CryptoError=CryptoError, api_key=lambda: 'fixture', Message=object, AsyncSession=object)
+                  CryptoError=CryptoError, api_key=lambda: 'fixture', test_scope=lambda: None,
+                  Message=object, AsyncSession=object)
         tree = ast.parse((ROOT / 'handlers/crypto_pay.py').read_text(encoding='utf-8'))
         node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef))
         node.decorator_list = []

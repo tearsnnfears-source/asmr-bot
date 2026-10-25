@@ -18,8 +18,11 @@ def register_crypto_routes(app, parse_init_data):
         return user['user_id']
 
     async def config(request):
-        await authenticated(request)
-        return web.json_response(await settings())
+        telegram_id = await authenticated(request)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise CryptoError('Invalid configuration request')
+        return web.json_response(await settings(telegram_id=telegram_id, tier=str(body.get('tier') or '').lower()))
 
     async def checkout(request):
         telegram_id = await authenticated(request)

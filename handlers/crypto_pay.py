@@ -4,7 +4,7 @@ from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import ADMIN_IDS
-from utils.crypto_payments import mode, set_mode
+from utils.crypto_payments import mode, set_mode, test_scope
 from utils.plisio import CryptoError, api_key
 
 router = Router()
@@ -24,11 +24,17 @@ async def crypto_pay(message: Message, session: AsyncSession):
         return
     try:
         current = await mode(session) if value == 'status' else await set_mode(session, value, message.from_user.id)
+        tester = test_scope()
     except CryptoError as error:
         await message.reply(error.code)
         return
+    scope_text = ''
+    if tester is not None:
+        state = 'включён' if current == 'plisio' else 'остановлен'
+        scope_text = f'Закрытый тест {state}: только PLUS €6 для ID {tester}. Остальным доступен Manual.\n'
     await message.reply(
         f'Криптооплата: {current.upper()}.\n'
         f'Ключ Plisio: {"настроен" if api_key() else "не настроен"}.\n'
+        f'{scope_text}'
         'Настройка только для этого бота и Mini App. Уже созданные счета продолжат обрабатываться.'
     )

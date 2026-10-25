@@ -23,10 +23,10 @@ def translation():
 
 
 class CardPaymentPauseTests(unittest.IsolatedAsyncioTestCase):
-    def test_new_buttons_never_link_to_tribute_even_when_configured(self):
+    def test_closed_checkout_does_not_use_legacy_links(self):
         namespace = dict(STARS_PRICES={30: 500}, TRIBUTE_BOT_URL="https://example.test/old-checkout",
                          InlineKeyboardMarkup=lambda **kw: kw, InlineKeyboardButton=lambda **kw: kw,
-                         t=translation())
+                         t=translation(), TRIBUTE_PLUS_URL="")
         keyboard = load_function("keyboards/inline.py", "kb_payment", namespace)
         for language in ("en", "ru", "es"):
             rows = keyboard(language, 30)["inline_keyboard"]
@@ -59,7 +59,7 @@ class CardPaymentPauseTests(unittest.IsolatedAsyncioTestCase):
                                    answer=AsyncMock(), message=SimpleNamespace(answer=AsyncMock()))
             handler = load_function("handlers/payment.py", "cb_tribute",
                                     dict(CallbackQuery=object, AsyncSession=object,
-                                         get_or_create_user=user_lookup, t=translation()))
+                                         get_or_create_user=user_lookup, t=translation(), TRIBUTE_PLUS_URL=""))
             await handler(call, session)
             call.answer.assert_awaited_once_with(translation()("card_payment_unavailable", language), show_alert=True)
             call.message.answer.assert_not_awaited()

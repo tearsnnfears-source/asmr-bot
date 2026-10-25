@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import get_or_create_user, PendingPayment, create_pending_invite, assign_tier_badge, consume_active_promo_days, complete_bundle_checkout, apply_external_grant, ExternalGrant
 from keyboards.inline import kb_payment, kb_plans, kb_after_payment, kb_back_to_cabinet
 from locales.texts import t
+from config import TRIBUTE_PLUS_URL
 from config import STARS_PRICES, STARS_TIER_PRICES, INVITE_LINK, GROUP_ID
 from utils.bundles import activate_bundle_access, send_bundle_access_message
 from utils.error_reporting import describe_error, format_bundle_failures, notify_admin_error
@@ -119,12 +120,22 @@ async def cb_crypto(call: CallbackQuery, session: AsyncSession):
     await call.answer(msg, show_alert=True)
 
 
-# Card/SBP is temporarily paused; old callback buttons remain safe to press.
+# Cached Card/SBP buttons use only the current gated checkout link.
 
 @router.callback_query(F.data.startswith("pay:tribute:"))
 async def cb_tribute(call: CallbackQuery, session: AsyncSession):
     user = await get_or_create_user(session, call.from_user.id)
     lang = user.lang or "en"
+    if TRIBUTE_PLUS_URL:
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        await call.answer()
+        await call.message.answer(
+            "Оформить подписку через Tribute:" if lang == "ru" else "Subscribe with Tribute:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Tribute", url=TRIBUTE_PLUS_URL),
+            ]]),
+        )
+        return
     await call.answer(t("card_payment_unavailable", lang), show_alert=True)
 
 # ─── Telegram Stars ───────────────────────────────────────────────────────────

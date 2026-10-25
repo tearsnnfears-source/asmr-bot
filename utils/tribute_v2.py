@@ -61,9 +61,10 @@ class Settings:
         test_price = (environ.get('TRIBUTE_V2_TEST_ASMR_PLUS_EUR1') or 'false').strip().lower()
         if test_price not in {'true', 'false'}:
             raise TributeV2Error('invalid_test_price_flag')
-        # Public checkout requires a separate reviewed release after the paid test.
-        if mode not in {'closed', 'test'}:
+        if mode not in {'closed', 'test', 'public'}:
             raise TributeV2Error('invalid_checkout_mode')
+        if mode == 'public' and test_price == 'true':
+            raise TributeV2Error('test_price_must_be_disabled')
         try:
             raw_ids = (environ.get('TRIBUTE_V2_TEST_TELEGRAM_IDS') or '').split(',')
             test_ids = frozenset(positive_id(int(value.strip())) for value in raw_ids if value.strip())
@@ -90,10 +91,11 @@ class Settings:
         return product.price_cents
 
     def require_test_access(self, telegram_id: int) -> None:
-        if self.mode != 'test':
+        if self.mode not in {'test', 'public'}:
             raise TributeV2Error('checkout_closed')
-        if positive_id(telegram_id) not in self.test_ids:
+        if self.mode == 'test' and positive_id(telegram_id) not in self.test_ids:
             raise TributeV2Error('test_account_required', 403)
+        positive_id(telegram_id)
         if not self.api_key:
             raise TributeV2Error('new_account_key_missing')
         if set(self.bindings) != set(PRODUCT_BY_CODE):

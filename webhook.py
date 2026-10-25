@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import html
 import logging
+from utils.tribute_checkout import checkout_details
 import json
 import time
 import os
@@ -18,6 +19,7 @@ from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_
 from utils.bundles import activate_bundle_access, bundle_projects_for_tier, get_peer_access_status, get_peer_bundle_checkout_status, refresh_peer_invite, route_peer_bundle_purchase, route_peer_plus_purchase, send_bundle_access_message
 from utils.error_reporting import describe_error, format_bundle_failures, notify_admin_error
 from utils.tribute_v2 import Settings as TributeV2Settings, TributeV2Error, parse_paid_event
+from utils.tribute_fulfillment import fulfill_public_payment
 
 logger = logging.getLogger(__name__)
 _background_tasks: set[asyncio.Task] = set()
@@ -478,13 +480,15 @@ async def tribute_v2_webhook(request: web.Request) -> web.Response:
     try:
         settings = TributeV2Settings.from_env(os.environ)
         payment = parse_paid_event(await request.read(), request.headers.get('trbt-signature', ''), settings)
-        # Start with the explicitly approved EUR 1 ASMR PLUS test only.
-        if payment.product.code != 's1ajK':
+        if settings.mode == 'test' and payment.product.code != 's1ajK':
             raise TributeV2Error('product_not_enabled_for_first_test')
     except TributeV2Error as error:
         if error.status == 200:
             return web.json_response({'status': 'ok', 'ignored': error.code})
         return web.json_response({'error': error.code}, status=error.status)
+    if settings.mode == 'public':
+        return await fulfill_public_payment(payment, json.loads(await request.read()),
+            find_bundle_source=_find_bundle_checkout_source, notify_admins=_notify_admins)
     return await tribute_webhook(request, _v2_payment=payment)
 
 
@@ -918,6 +922,29 @@ async def parse_init_data(request: web.Request) -> dict:
         return validate_telegram_init_data(init_data)
     except:
         return None
+
+
+async def api_tribute_checkout(request: web.Request) -> web.Response:
+    user_data = await parse_init_data(request)
+    if not user_data:
+        return web.json_response({"error": "Invalid Telegram session"}, status=401)
+    try:
+        data = await request.json()
+        result = checkout_details(PROJECT_KEY, str(data.get("tier") or "").lower(),
+                                  data.get("bundle_target"))
+        if result["tier"] in {"elite", "king"}:
+            async with async_session() as session:
+                checkout = await prepare_bundle_checkout(
+                    session, telegram_id=user_data["user_id"], tier=result["tier"],
+                    target_project=result["target_project"],
+                )
+                result["checkout_id"] = checkout.id
+        return web.json_response({"ok": True, **result})
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except Exception:
+        logger.error("New Tribute checkout preparation failed")
+        return web.json_response({"error": "Could not prepare checkout"}, status=503)
 
 
 async def api_prepare_bundle_checkout(request: web.Request) -> web.Response:
@@ -2663,6 +2690,7 @@ def create_app() -> web.Application:
     app.router.add_post("/internal/refresh_invite", internal_refresh_invite)
     app.router.add_post("/miniapp/create_stars_invoice", api_create_stars_invoice)
     app.router.add_post("/miniapp/prepare_bundle_checkout", api_prepare_bundle_checkout)
+    app.router.add_post("/miniapp/tribute_checkout", api_tribute_checkout)
     app.router.add_post("/miniapp/access_links", api_access_links)
     app.router.add_post("/miniapp/access_links/refresh", api_refresh_access_link)
     app.router.add_post("/miniapp/promo/activate", api_promo_activate)

@@ -231,6 +231,7 @@ async def get_peer_bundle_checkout_status(
                     "label": label,
                     "created_at": data.get("created_at") or "",
                     "target_project": data.get("target_project") or "",
+                    "checkout_id": data.get("checkout_id"),
                 }
     except Exception as exc:
         logger.warning("Bundle checkout lookup error for %s: %s", project, exc)
@@ -247,6 +248,8 @@ async def route_peer_bundle_purchase(
     full_name: str | None,
     days: int,
     renewal: bool,
+    checkout_id: int | None = None,
+    target_project: str | None = None,
 ) -> dict:
     """Complete a shared Tribute bundle inside the source bot."""
     endpoint, grant_secret, label = _peer_endpoint(project, "bundle_purchase")
@@ -265,6 +268,8 @@ async def route_peer_bundle_purchase(
         "full_name": full_name or "",
         "days": int(days),
         "renewal": bool(renewal),
+        "checkout_id": checkout_id,
+        "target_project": target_project,
     }
     try:
         timeout = ClientTimeout(total=35)
@@ -323,7 +328,7 @@ async def route_peer_plus_purchase(
         "tier": "plus",
         "username": username or "",
         "full_name": full_name or "",
-        "payment_method": "tribute",
+        "payment_method": "tribute_v2" if order_uuid.startswith("tribute-v2:") else "tribute",
         "silent": False,
     }
     try:

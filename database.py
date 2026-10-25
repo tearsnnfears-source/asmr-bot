@@ -1011,6 +1011,10 @@ async def apply_external_grant(
         safe_tier = "elite"
 
     user = await get_or_create_user(session, telegram_id, username=username, full_name=full_name)
+    user = (await session.execute(
+        select(User).where(User.telegram_id == telegram_id).with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalar_one()
     if username and not user.username:
         user.username = username
     if full_name and not user.full_name:
@@ -1020,7 +1024,7 @@ async def apply_external_grant(
     user.units = base + safe_days
     user.is_active = True
     user.last_payment_method = payment_method
-    tier_rank = {"free": 0, "plus": 1, "pro": 2, "elite": 3}
+    tier_rank = {"free": 0, "plus": 1, "pro": 2, "elite": 3, "king": 4, "lifetime": 5}
     current_tier = (user.tier or "plus").lower()
     if tier_rank.get(safe_tier, 0) > tier_rank.get(current_tier, 0):
         user.tier = safe_tier
@@ -1152,6 +1156,11 @@ async def complete_bundle_checkout(
     )
     existing = existing_result.scalar_one_or_none()
     if existing:
+        if existing.status == "partial":
+            existing.access_links = list(access_links or [])
+            existing.status = "partial" if partial else "completed"
+            existing.consumed = False
+            await session.commit()
         return existing
 
     checkout = await session.get(BundleCheckout, int(checkout_id)) if checkout_id else None

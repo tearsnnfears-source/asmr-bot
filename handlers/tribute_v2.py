@@ -16,6 +16,8 @@ async def tribute_test(message: Message):
         return
     try:
         settings = Settings.from_env(os.environ)
+        if settings.mode != 'test':
+            raise TributeV2Error('private_test_finished')
         product, _ = checkout_product(settings, message.from_user.id, 's1ajK')
     except TributeV2Error:
         await message.answer('Tribute test checkout is closed or unavailable for this account.')

@@ -1,5 +1,5 @@
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from config import STARS_PRICES
+from config import STARS_PRICES, TRIBUTE_PLUS_URL
 from locales.texts import t
 
 
@@ -47,9 +47,9 @@ def kb_cabinet(lang: str, has_sub: bool, trial_used: bool = False) -> InlineKeyb
 
 def kb_plans(lang: str) -> InlineKeyboardMarkup:
     if lang == "ru":
-        btn_text = f"📅 Месячная подписка — 499₽"
+        btn_text = f"📅 Месячная подписка — €6"
     else:
-        btn_text = f"📅 Monthly subscription — €5"
+        btn_text = f"📅 Monthly subscription — €6"
 
     rows = [
         [InlineKeyboardButton(text=btn_text, callback_data="plan:30")],
@@ -62,7 +62,7 @@ def kb_payment(lang: str, days: int) -> InlineKeyboardMarkup:
     stars = STARS_PRICES[days]
     if lang == "ru":
         tribute_btn = InlineKeyboardButton(
-            text="🏦 СБП / Карта", callback_data=f"pay:tribute:{days}"
+            text="🏦 СБП / Карта", **({"url": TRIBUTE_PLUS_URL} if TRIBUTE_PLUS_URL else {"callback_data": f"pay:tribute:{days}"})
         )
         rows = [
             [tribute_btn],
@@ -72,7 +72,7 @@ def kb_payment(lang: str, days: int) -> InlineKeyboardMarkup:
         ]
     else:
         card_btn = InlineKeyboardButton(
-            text="💳 Card / SBP", callback_data=f"pay:tribute:{days}"
+            text="💳 Card / SBP", **({"url": TRIBUTE_PLUS_URL} if TRIBUTE_PLUS_URL else {"callback_data": f"pay:tribute:{days}"})
         )
         rows = [
             [card_btn],

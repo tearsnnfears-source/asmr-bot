@@ -20,10 +20,11 @@ TRIBUTE_SITE_WEBHOOK_URL = os.getenv(
 )
 
 # Tribute per-tier links  (startapp code → tier)
-TRIBUTE_PLUS_URL = ""  # Retired account; V2 checkout stays separately gated.
-TRIBUTE_PRO_URL = ""  # Retired account; V2 checkout stays separately gated.
-TRIBUTE_ELITE_URL = ""  # Retired account; V2 checkout stays separately gated.
-TRIBUTE_KING_URL = ""  # Retired account; V2 checkout stays separately gated.
+from utils.tribute_checkout import checkout_link
+TRIBUTE_PLUS_URL = checkout_link(os.getenv("PROJECT_KEY", "asmrleaks"), "plus")
+TRIBUTE_PRO_URL = checkout_link(os.getenv("PROJECT_KEY", "asmrleaks"), "pro")
+TRIBUTE_ELITE_URL = checkout_link(os.getenv("PROJECT_KEY", "asmrleaks"), "elite")
+TRIBUTE_KING_URL = checkout_link(os.getenv("PROJECT_KEY", "asmrleaks"), "king")
 TRIBUTE_ELITE_MIN_EUR = float(os.getenv("TRIBUTE_ELITE_MIN_EUR", "9") or "9")
 
 # startapp code → tier (used in webhook to auto-assign tier)

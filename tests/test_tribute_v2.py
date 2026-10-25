@@ -8,7 +8,7 @@ import unittest
 from utils.tribute_v2 import (PRODUCTS, PRODUCT_BY_CODE, Settings, TributeV2Error,
                              checkout_product, parse_paid_event, verify_signature)
 
-PAYER = 8960267391
+PAYER = 1234567890
 KEY = 'fixture-new-account-key'
 BINDINGS = {product.code: {'subscription_id': 1000 + index, 'period_id': 2000 + index}
             for index, product in enumerate(PRODUCTS)}
@@ -43,6 +43,15 @@ def parse(data=None, config=None):
 
 
 class TributeV2PolicyTests(unittest.TestCase):
+    def test_public_mode_accepts_normal_products_for_other_users_but_never_the_euro_one_override(self):
+        config = settings(TRIBUTE_V2_MODE='public')
+        for product in PRODUCTS:
+            payment = parse(event(product.code, telegram_user_id=PAYER+1), config)
+            self.assertEqual(payment.product, product)
+        self.assert_code('price_mismatch', lambda: parse(event(price=100, amount=70), config))
+        self.assert_code('test_price_must_be_disabled', lambda:
+                         settings(TRIBUTE_V2_MODE='public', TRIBUTE_V2_TEST_ASMR_PLUS_EUR1='true'))
+
     def test_non_hex_signatures_are_rejected_without_a_server_error(self):
         for signature in ['я' * 64, 'z' * 64, None]:
             with self.assertRaises(TributeV2Error) as caught:
@@ -70,7 +79,7 @@ class TributeV2PolicyTests(unittest.TestCase):
         self.assertEqual(config.mode, 'closed')
         self.assertEqual(config.api_key, '')
         self.assert_code('checkout_closed', lambda: checkout_product(config, PAYER, 's1ajK'))
-        self.assert_code('invalid_checkout_mode', lambda: settings(TRIBUTE_V2_MODE='public'))
+        self.assert_code('invalid_checkout_mode', lambda: settings(TRIBUTE_V2_MODE='unknown'))
 
     def test_only_explicit_test_user_can_receive_checkout_links(self):
         self.assert_code('test_account_required', lambda: checkout_product(settings(), PAYER + 1, 's1ajK'))

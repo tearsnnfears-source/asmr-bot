@@ -4,6 +4,7 @@ import hmac
 import html
 import logging
 from utils.tribute_checkout import checkout_details
+from utils.crypto_routes import register_crypto_routes
 import json
 import time
 import os
@@ -2681,6 +2682,7 @@ async def api_health(request: web.Request) -> web.Response:
 
 def create_app() -> web.Application:
     app = web.Application()
+    register_crypto_routes(app, parse_init_data)
     app.middlewares.append(cors_middleware)
     app.router.add_get("/health", api_health)
     app.router.add_post("/tribute-webhook", tribute_webhook)

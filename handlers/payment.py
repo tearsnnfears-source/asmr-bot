@@ -116,8 +116,14 @@ async def cb_plan(call: CallbackQuery, session: AsyncSession, bot: Bot):
 async def cb_crypto(call: CallbackQuery, session: AsyncSession):
     user = await get_or_create_user(session, call.from_user.id)
     lang = user.lang or "en"
-    msg = "💎 Crypto payments coming soon!" if lang == "en" else "💎 Оплата криптовалютой — скоро!"
-    await call.answer(msg, show_alert=True)
+    from config import MINIAPP_URL
+    from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+    await call.answer()
+    await call.message.answer('Выберите тариф и криптовалюту в Mini App.' if lang == 'ru'
+                              else 'Choose your plan and cryptocurrency in the Mini App.',
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text='Mini App', url=MINIAPP_URL),
+        ]]))
 
 
 # Cached Card/SBP buttons use only the current gated checkout link.

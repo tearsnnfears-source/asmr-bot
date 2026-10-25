@@ -10,7 +10,7 @@ from aiohttp import web
 from database import init_db
 from utils.middleware import DatabaseMiddleware
 from utils.scheduler import setup_scheduler
-from handlers import payment_grace
+from handlers import payment_grace, crypto_pay
 from handlers import start, cabinet, payment, group, admin, favorites
 from handlers import tribute_v2
 from handlers import poster as poster_handler
@@ -40,6 +40,7 @@ async def main():
     dp.include_router(payment.router)
     dp.include_router(admin.router)
     dp.include_router(payment_grace.router)
+    dp.include_router(crypto_pay.router)
     dp.include_router(favorites.router)
     dp.include_router(poster_handler.router)
 

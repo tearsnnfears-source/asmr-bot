@@ -335,6 +335,7 @@ async def cmd_admin_help(message: Message):
         "/sync_tier_badges — выдать бейджи PLUS/PRO/ELITE всем по тиру\n"
         "/fix_grace — убрать grace у не-tribute пользователей (одноразово)\n"
         "/payment_grace off|on|status — grace со следующих 00:00 МСК\n"
+        "/crypto_pay Plisio|Manual|status — криптооплата бота и Mini App\n"
         "/create_code [CODE] [дней] [лимит] — промокод на дни после оплаты\n"
         "/codes — список всех промокодов\n"
         "/del_code [CODE] — отключить промокод\n"

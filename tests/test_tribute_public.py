@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 
 from utils.tribute_v2 import parse_paid_event
+from utils.payment_notifications import payment_admin_notice
 from test_tribute_v2 import settings, event, signed, PAYER
 
 ROOT = Path(__file__).parents[1]
@@ -99,11 +100,11 @@ class PublicPayments(unittest.IsolatedAsyncioTestCase):
             create_pending_invite=AsyncMock(),get_latest_invite=AsyncMock(return_value='https://example.test/saved'),
             Bot=lambda **kwargs:self.bot,BOT_TOKEN='fixture',GROUP_ID=-100123,INVITE_LINK='',PROJECT_KEY='asmrleaks',
             InlineKeyboardButton=lambda **kw:kw,InlineKeyboardMarkup=lambda **kw:kw,
-            route_peer_plus_purchase=AsyncMock(return_value={'ok':True}),
-            route_peer_bundle_purchase=AsyncMock(return_value={'ok':True}),
+            route_peer_plus_purchase=AsyncMock(return_value={'ok':True,'days_left':38}),
+            route_peer_bundle_purchase=AsyncMock(return_value={'ok':True,'days_left':38,'links_count':2}),
             activate_bundle_access=AsyncMock(return_value=([{'project':'asmrleaks','url':'https://example.test/a'},{'project':'asianleaks','url':'https://example.test/b'}],[])),
             send_bundle_access_message=AsyncMock(),notify_admin_error=AsyncMock(),
-            logger=logging.getLogger('public-tribute-test'))
+            logger=logging.getLogger('public-tribute-test'),payment_admin_notice=payment_admin_notice)
         load_function('database.py','claim_tribute_webhook_event',self.ns)
         load_function('database.py','apply_external_grant',self.ns)
         load_function('database.py','complete_bundle_checkout',self.ns)
@@ -138,6 +139,28 @@ class PublicPayments(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.state())[:4],(38,'plus','tribute_v2',1))
         self.bot.create_chat_invite_link.assert_awaited_once()
         self.bot.send_message.assert_awaited_once()
+        self.notify.assert_awaited_once()
+        notice = self.notify.await_args.args[0]
+        self.assertIn('Новая подписка — Tribute V2', notice)
+        self.assertIn('Сумма: <b>€6.00</b>', notice)
+        self.assertIn('Tier: <b>PLUS</b>', notice)
+        self.assertIn('Subscription ID: <code>1000</code>', notice)
+        self.assertIn('+31 дней | Итого: 38 дн.', notice)
+
+    async def test_receipt_preserves_channel_and_username_with_html_escaping(self):
+        self.assertEqual((await self.pay(telegram_username='fixture<&',channel_name='channel<&'))[0],200)
+        notice=self.notify.await_args.args[0]
+        self.assertIn('@fixture&lt;&amp;',notice)
+        self.assertIn('Канал: <code>channel&lt;&amp;</code>',notice)
+
+    async def test_peer_notification_uses_peer_total_not_asmr_balance(self):
+        self.ns['route_peer_plus_purchase'].return_value={'ok':True,'days_left':77}
+        self.assertEqual((await self.pay('s1ajL'))[0],200)
+        notice=self.notify.await_args.args[0]
+        self.assertIn('Сумма: <b>€5.50</b>',notice)
+        self.assertIn('Канал: <code>PrivateLeaks</code>',notice)
+        self.assertIn('Итого: 77 дн.',notice)
+        self.assertEqual((await self.state())[0],7)
 
     async def test_pro_is_eight_euro_and_does_not_depend_on_net_amount(self):
         self.assertEqual((await self.pay('s1ajR',amount=650))[0],200)
@@ -180,6 +203,8 @@ class PublicPayments(unittest.IsolatedAsyncioTestCase):
         response=await self.ns['fulfill_public_payment'](payment,data,find_bundle_source=self.find,notify_admins=self.notify)
         self.assertEqual(response.status,200)
         self.assertEqual((await self.state())[0],69)
+        self.assertIn('Продление подписки — Tribute V2',self.notify.await_args.args[0])
+        self.assertIn('Итого: 69 дн.',self.notify.await_args.args[0])
 
     async def test_peer_elite_is_bound_to_its_original_checkout_on_retry(self):
         self.find.return_value=({'project':'privateleaks','checkout_id':42,'target_project':'extraleaks'},[])
@@ -248,12 +273,16 @@ class PublicPayments(unittest.IsolatedAsyncioTestCase):
                 request=SimpleNamespace(json=AsyncMock(return_value={'telegram_id':uid,'tier':'elite',
                     'order_uuid':'tribute-v2:'+project,'days':31,'checkout_id':checkout_id,'target_project':target}))
                 self.assertEqual((await handler(request)).status,503)
-                self.assertEqual((await handler(request)).status,200)
+                completed=await handler(request)
+                self.assertEqual(completed.status,200)
                 async with self.sessions() as session:
                     user=await session.get(self.User,uid)
                     checkout=await session.get(self.Checkout,checkout_id)
                     self.assertEqual((user.units,user.last_payment_method),(38,'tribute_v2'))
                     self.assertEqual((checkout.status,len(checkout.access_links)),('completed',2))
+                response=json.loads(completed.text)
+                self.assertEqual(response['days_left'],38)
+                self.assertEqual(response['links_count'],2)
                 ns['get_bundle_checkout_for_tribute'].assert_not_awaited()
 
     async def test_peer_rejects_a_checkout_bound_to_a_different_payer(self):

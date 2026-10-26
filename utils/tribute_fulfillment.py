@@ -15,6 +15,7 @@ from database import (async_session, TributeWebhookEvent, BundleCheckout,
 from utils.bundles import (activate_bundle_access, route_peer_bundle_purchase,
                            route_peer_plus_purchase, send_bundle_access_message)
 from utils.error_reporting import notify_admin_error
+from utils.payment_notifications import payment_admin_notice
 
 logger = logging.getLogger(__name__)
 STATE = '_v2_fulfillment'
@@ -113,7 +114,8 @@ async def _deliver_local(payment, context, payload):
                 local_days_left=user.units, links=links, lang=user.lang or 'en',
                 order_uuid=payment.order_uuid,
             )
-            return
+            return {'days_left': user.units, 'username': user.username,
+                    'links_count': len(links), 'local_tier': 'pro'}
         async with async_session() as session:
             invite = await get_latest_invite(session, payment.telegram_id) if not applied else None
         if not invite and GROUP_ID:
@@ -152,6 +154,7 @@ async def _deliver_local(payment, context, payload):
             )
     finally:
         await bot.session.close()
+    return {'days_left': user.units, 'username': user.username}
 
 
 async def fulfill_public_payment(payment, data, *, find_bundle_source, notify_admins):
@@ -172,7 +175,7 @@ async def fulfill_public_payment(payment, data, *, find_bundle_source, notify_ad
                 return web.json_response({'status':'ok','duplicate':True})
             payload = data['payload']
             if context['source'] == PROJECT_KEY:
-                await _deliver_local(payment, context, payload)
+                result = await _deliver_local(payment, context, payload)
             elif payment.product.tier == 'plus':
                 result = await route_peer_plus_purchase(
                     project=context['source'], telegram_id=payment.telegram_id,
@@ -193,12 +196,16 @@ async def fulfill_public_payment(payment, data, *, find_bundle_source, notify_ad
                     raise FulfillmentPending('bundle_delivery_pending')
             row.payload = {**row.payload, STATE:{**context, 'state':'completed'}}
             await session.commit()
-        await notify_admins(
-            f'<b>Tribute V2: {payment.product.tier.upper()} активирован</b>\n'
-            f'User: <code>{payment.telegram_id}</code>\n'
-            f'Проект: <code>{context["source"]}</code> | +{context["days"]} дней\n'
-            f'EUR {payment.product.price_cents / 100:.2f}'
-        )
+        await notify_admins(payment_admin_notice(
+            provider='Tribute V2', telegram_id=payment.telegram_id,
+            username=payload.get('telegram_username') or result.get('username'),
+            amount=f'€{payment.product.price_cents / 100:.2f}',
+            tier=payment.product.tier, project=context['source'],
+            channel=payload.get('channel_name'), receipt_id=payload.get('subscription_id'),
+            days=context['days'], total_days=result.get('days_left'),
+            renewal=payment.renewal, promo_code=context.get('promo'),
+            links_count=result.get('links_count'), local_tier=result.get('local_tier'),
+        ))
         return web.json_response({'status':'ok','tier':payment.product.tier})
     except Exception as error:
         code = str(error) if isinstance(error, FulfillmentPending) else 'fulfillment_pending'

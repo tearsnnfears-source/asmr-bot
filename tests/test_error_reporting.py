@@ -11,6 +11,7 @@ from types import ModuleType, SimpleNamespace
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, Mock, patch
+from utils.payment_notifications import payment_admin_notice
 
 ROOT = Path(__file__).parents[1]
 REPORTING = runpy.run_path(str(ROOT / 'utils/error_reporting.py'))
@@ -178,6 +179,8 @@ class PaymentFailureFlowTests(unittest.IsolatedAsyncioTestCase):
             select=lambda *_args: SimpleNamespace(where=lambda *_args: None),
             ExternalGrant=SimpleNamespace(id=0, source_project='', order_uuid=''),
             INVITE_LINK='https://example.test/fallback', GROUP_ID=None,
+            PROJECT_KEY='asmrleaks',
+            payment_admin_notice=payment_admin_notice,
             async_session=lambda: SessionContext(session),
         )
         message = SimpleNamespace(from_user=SimpleNamespace(id=123),

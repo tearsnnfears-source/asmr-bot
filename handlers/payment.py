@@ -19,6 +19,8 @@ from config import TRIBUTE_PLUS_URL
 from config import STARS_PRICES, STARS_TIER_PRICES, INVITE_LINK, GROUP_ID
 from utils.bundles import activate_bundle_access, send_bundle_access_message
 from utils.error_reporting import describe_error, format_bundle_failures, notify_admin_error
+from utils.payment_notifications import payment_admin_notice
+from config import PROJECT_KEY
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -283,9 +285,6 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
 
         logger.info(f"Stars credited: user {user_id} +{days} days → total {user.units}")
 
-        nick = f"@{user.username}" if user.username else f"id{user_id}"
-        promo_line = f"\n🎟 Промокод: <code>{promo_code}</code>" if promo_code else ""
-
         if is_bundle:
             bundle_stage = "Выдача доступа связанным проектам и создание ссылок"
             bundle_access_state = "bundle_unconfirmed"
@@ -314,13 +313,12 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
                 )
                 bundle_access_state = "links_saved"
                 failure_line = format_bundle_failures(failures)
-                await _notify_admins(bot,
-                    f"⭐ <b>Новая {tier.upper()} оплата — TG Stars</b>\n"
-                    f"👤 {nick} | <code>{user_id}</code>\n"
-                    f"📅 +{days} дней | Итого ASMR: {user.units} дн. | tier=PRO\n"
-                    f"🔗 Ссылок: {len(access_links)}"
-                    f"{promo_line}{failure_line}"
-                )
+                await _notify_admins(bot, payment_admin_notice(
+                    provider='TG Stars', telegram_id=user_id, username=user.username,
+                    amount=f'{paid_amount} ⭐ (XTR)', tier=tier, project=PROJECT_KEY,
+                    days=days, total_days=user.units, receipt_id=charge_id,
+                    promo_code=promo_code, links_count=len(access_links), local_tier='pro',
+                ) + failure_line)
                 bundle_stage = "Отправка сообщения со ссылками"
                 await send_bundle_access_message(
                     bot,
@@ -341,12 +339,11 @@ async def process_successful_payment(message: Message, session: AsyncSession, bo
             return
 
         # Уведомление админу
-        await _notify_admins(bot,
-            f"⭐ <b>Новая оплата — TG Stars</b>\n"
-            f"👤 {nick} | <code>{user_id}</code>\n"
-            f"📅 +{days} дней | Итого: {user.units} дн."
-            f"{promo_line}"
-        )
+        await _notify_admins(bot, payment_admin_notice(
+            provider='TG Stars', telegram_id=user_id, username=user.username,
+            amount=f'{paid_amount} ⭐ (XTR)', tier=tier, project=PROJECT_KEY,
+            days=days, total_days=user.units, receipt_id=charge_id, promo_code=promo_code,
+        ))
 
         # Generate unique invite link and store for miniapp polling
         invite_link = INVITE_LINK

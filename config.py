@@ -7,6 +7,10 @@ BOT_TOKEN       = os.getenv("BOT_TOKEN")
 GROUP_ID        = int(os.getenv("GROUP_ID", "0"))
 INVITE_LINK     = os.getenv("INVITE_LINK", "")
 ADMIN_IDS       = list(map(int, os.getenv("ADMIN_IDS", "0").split(",")))
+# Mini app redesign beta: these Telegram IDs get the new design ("*" = everyone).
+_BETA_RAW = os.getenv("BETA_TESTER_IDS", "7859079678").strip()
+BETA_FOR_ALL = _BETA_RAW == "*"
+BETA_TESTER_IDS = set() if BETA_FOR_ALL else {int(x) for x in _BETA_RAW.split(",") if x.strip().isdigit()}
 DATABASE_URL    = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./asmr.db")
 WEBHOOK_HOST    = os.getenv("WEBHOOK_HOST", "")
 

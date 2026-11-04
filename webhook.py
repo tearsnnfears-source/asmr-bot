@@ -1746,8 +1746,23 @@ async def api_get_artist_content(request: web.Request) -> web.Response:
             })
 
 
+async def _is_free_editor_pick(session, content_id: int) -> bool:
+    """The current Editor's picks are free to watch in the mini app."""
+    try:
+        row = (await session.execute(sa_text(
+            "SELECT 1 FROM homepage_editorial_picks "
+            "WHERE content_id = :cid AND starts_at <= NOW() AND ends_at > NOW() LIMIT 1"
+        ), {"cid": content_id})).first()
+        return row is not None
+    except Exception as e:
+        logger.warning(f"editor pick check unavailable: {e}")
+        await session.rollback()
+        return False
+
+
 async def api_content_play(request: web.Request) -> web.Response:
-    """POST /miniapp/content/play — return a playable URL only for active users."""
+    """POST /miniapp/content/play — a playable URL for active users, or for
+    anyone signed in to Telegram when the video is a current Editor's pick."""
     try:
         data = await request.json()
         user_id = _parse_user_id(data.get("initData", ""))
@@ -1758,7 +1773,7 @@ async def api_content_play(request: web.Request) -> web.Response:
         async with async_session() as session:
             user_result = await session.execute(select(User).where(User.telegram_id == user_id))
             user = user_result.scalar_one_or_none()
-            if not user or user.units <= 0:
+            if (not user or user.units <= 0) and not await _is_free_editor_pick(session, content_id):
                 return web.json_response({"error": "No subscription"}, status=403)
 
             content_result = await session.execute(

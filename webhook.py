@@ -16,6 +16,7 @@ from aiogram.types import LabeledPrice
 from sqlalchemy import select, text as sa_text, func as sa_func, or_ as sa_or
 
 from database import async_session, User, PendingPayment, Artist, get_all_artists, ArtistContent, get_artist_content, Tag, get_all_tags, get_reactions, get_user_reactions, get_user_reaction, set_reaction, get_comments, add_comment, ALLOWED_REACTIONS, Favorite, Playlist, PlaylistItem, ArtistSuggestion, CustomBadge, get_custom_badges, PendingInvite, BundleCheckout, create_pending_invite, consume_pending_invite, get_latest_invite, assign_tier_badge, activate_promo_code, get_active_promo_activation, consume_active_promo_days, claim_tribute_webhook_event, normalize_promo_code, apply_external_grant, prepare_bundle_checkout, get_bundle_checkout_for_tribute, complete_bundle_checkout, get_latest_bundle_access, bundle_access_payload, _auto_thumbnail
+from config import BETA_FOR_ALL, BETA_TESTER_IDS
 from config import TRIBUTE_API_KEY, TRIBUTE_SITE_WEBHOOK_URL, BOT_TOKEN, INVITE_LINK, STARS_PRICES, STARS_TIER_PRICES, GROUP_ID, ADMIN_IDS, TRIBUTE_PLUS_URL, TRIBUTE_PRO_URL, TRIBUTE_ELITE_URL, TRIBUTE_KING_URL, PROJECT_KEY, INTERNAL_GRANT_SECRET, BUNDLE_PEERS
 from utils.bundles import activate_bundle_access, bundle_projects_for_tier, get_peer_access_status, get_peer_bundle_checkout_status, refresh_peer_invite, route_peer_bundle_purchase, route_peer_plus_purchase, send_bundle_access_message
 from utils.error_reporting import describe_error, format_bundle_failures, notify_admin_error
@@ -149,6 +150,11 @@ def validate_telegram_init_data(init_data: str) -> dict | None:
 def _parse_user_id(init_data: str) -> int | None:
     user_data = validate_telegram_init_data(init_data)
     return user_data["user_id"] if user_data else None
+
+
+def _is_beta_tester(user_id: int | None) -> bool:
+    """Whether the mini app should show this user the redesign (BETA_TESTER_IDS)."""
+    return bool(user_id) and (BETA_FOR_ALL or user_id in BETA_TESTER_IDS)
 
 
 def _content_meta(item: ArtistContent, include_url: bool = False) -> dict:
@@ -1337,7 +1343,7 @@ async def api_get_profile(request: web.Request) -> web.Response:
             user = result.scalar_one_or_none()
             
             if not user:
-                return web.json_response({"days_left": 0, "show_subscribe_button": True, "trial_used": False, "lang": ""})
+                return web.json_response({"days_left": 0, "show_subscribe_button": True, "trial_used": False, "lang": "", "beta": _is_beta_tester(user_id)})
             
             days_left = user.units or 0
             show_subscribe = True if days_left <= 3 else False
@@ -1355,6 +1361,7 @@ async def api_get_profile(request: web.Request) -> web.Response:
                 "tribute_pro_url": TRIBUTE_PRO_URL,
                 "tribute_elite_url": TRIBUTE_ELITE_URL,
                 "tribute_king_url": TRIBUTE_KING_URL,
+                "beta": _is_beta_tester(user_id),
             })
     except Exception as e:
         logger.error(f"Error in api_get_profile: {e}")
@@ -1635,6 +1642,38 @@ async def api_get_videos(request: web.Request) -> web.Response:
             })
     except Exception as e:
         return web.json_response({"error": str(e)}, status=500)
+
+
+async def api_get_editor_picks(request: web.Request) -> web.Response:
+    """GET /miniapp/editor_picks — the website's current Editor's picks.
+
+    The site schedules three picks per 4-day period in homepage_editorial_picks
+    (same database). Hidden or missing videos are skipped; no table → [].
+    """
+    from sqlalchemy import text as _t
+    try:
+        async with async_session() as session:
+            ids = (await session.execute(_t(
+                "SELECT content_id FROM homepage_editorial_picks "
+                "WHERE starts_at <= NOW() AND ends_at > NOW() "
+                "ORDER BY position ASC"
+            ))).scalars().all()
+            if not ids:
+                return web.json_response({"items": []})
+            rows = (await session.execute(
+                select(ArtistContent)
+                .where(ArtistContent.id.in_(ids))
+                .where(ArtistContent.content_type == "video")
+            )).scalars().all()
+            by_id = {row.id: row for row in rows}
+            items = [_content_meta(by_id[i]) for i in ids if i in by_id]
+            return web.json_response(
+                {"items": items},
+                headers={"Cache-Control": "public, max-age=120"},
+            )
+    except Exception as e:
+        logger.warning(f"editor_picks unavailable: {e}")
+        return web.json_response({"items": []})
 
 
 async def api_get_custom_badges(request: web.Request) -> web.Response:
@@ -2702,6 +2741,7 @@ def create_app() -> web.Application:
     app.router.add_post("/miniapp/my_invite", api_my_invite)
     app.router.add_get("/miniapp/artists", api_get_artists)
     app.router.add_get("/miniapp/videos", api_get_videos)
+    app.router.add_get("/miniapp/editor_picks", api_get_editor_picks)
     app.router.add_get("/miniapp/custom_badges", api_get_custom_badges)
     app.router.add_post("/miniapp/profile", api_get_profile)
     app.router.add_post("/miniapp/set_language", api_set_language)
